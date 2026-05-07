@@ -3,6 +3,8 @@ pandas
 openpyxl
 PyMuPDF
 Pillow
-pytesseract
 opencv-python-headless
 numpy
+easyocr
+torch
+torchvision
