@@ -1,5 +1,4 @@
 import re
-import gc
 from io import BytesIO
 
 import fitz
@@ -36,7 +35,7 @@ def extract_data(text):
 
 
 def ocr_page(page):
-    pix = page.get_pixmap(dpi=120)
+    pix = page.get_pixmap(dpi=180)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     text = pytesseract.image_to_string(
@@ -44,10 +43,6 @@ def ocr_page(page):
         lang="eng",
         config="--psm 6"
     )
-
-    del pix
-    del img
-    gc.collect()
 
     return text
 
@@ -60,7 +55,7 @@ def create_excel(data):
         df.to_excel(writer, index=False, sheet_name="Sondages")
 
     output.seek(0)
-    return output, df
+    return output
 
 
 uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
@@ -68,16 +63,12 @@ uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 if uploaded_pdf:
     try:
         doc = fitz.open(stream=uploaded_pdf.getvalue(), filetype="pdf")
-
         results = []
-        total_pages = len(doc)
 
-        st.info(f"PDF chargé : {total_pages} pages")
+        st.info(f"PDF chargé : {len(doc)} pages")
         progress = st.progress(0)
 
-        for i in range(total_pages):
-            page = doc.load_page(i)
-
+        for i, page in enumerate(doc):
             text = ocr_page(page)
             row = extract_data(text)
             row["Page"] = i + 1
@@ -85,18 +76,14 @@ if uploaded_pdf:
             if row["Nom sondage"] or row["X"] or row["Y"]:
                 results.append(row)
 
-            progress.progress((i + 1) / total_pages)
-
-            del page
-            gc.collect()
-
-        doc.close()
+            progress.progress((i + 1) / len(doc))
 
         if results:
-            excel_file, df = create_excel(results)
-
+            df = pd.DataFrame(results)
             st.success(f"{len(df)} lignes trouvées")
             st.dataframe(df, width="stretch")
+
+            excel_file = create_excel(results)
 
             st.download_button(
                 "Télécharger Excel",
