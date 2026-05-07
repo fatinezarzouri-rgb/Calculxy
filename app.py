@@ -1,4 +1,6 @@
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import re
 import tempfile
 from io import BytesIO
@@ -11,28 +13,39 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-st.set_page_config(page_title="Extraction Pressiomètre", layout="wide")
+st.set_page_config(
+    page_title="Extraction Pressiomètre",
+    layout="wide"
+)
+
 st.title("Extraction automatique Pf / Pl / EM")
+
 
 @st.cache_resource
 def load_reader():
     return easyocr.Reader(["en"], gpu=False)
 
+
 reader = load_reader()
 
 
 def pdf_to_images(uploaded_file, zoom=4):
+
     pages = []
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
-        path = tmp.name
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".pdf"
+    ) as tmp:
 
-    doc = fitz.open(path)
+        tmp.write(uploaded_file.read())
+        pdf_path = tmp.name
+
+    doc = fitz.open(pdf_path)
 
     for i in range(len(doc)):
+
         page = doc.load_page(i)
 
         pix = page.get_pixmap(
@@ -53,7 +66,32 @@ def pdf_to_images(uploaded_file, zoom=4):
     return pages
 
 
-def easyocr_numbers(img):
+def extract_sondage(img):
+
+    arr = np.array(img)
+
+    results = reader.readtext(
+        arr,
+        detail=0
+    )
+
+    text = " ".join(results)
+
+    text = text.replace(" ", "_")
+
+    m = re.search(
+        r"(SP[_\-]?[A-Za-z]+[_\-]?\d+)",
+        text
+    )
+
+    if m:
+        return m.group(1)
+
+    return "NON_DETECTE"
+
+
+def extract_all_numbers(img):
+
     arr = np.array(img)
 
     results = reader.readtext(
@@ -62,21 +100,24 @@ def easyocr_numbers(img):
         paragraph=False
     )
 
-    out = []
+    values = []
 
     for r in results:
+
         box, text, conf = r
 
-        text = text.replace(",", ".").strip()
+        text = text.strip().replace(",", ".")
 
         if re.fullmatch(r"\d+(\.\d+)?", text):
+
             try:
+
                 value = float(text)
 
                 xs = [p[0] for p in box]
                 ys = [p[1] for p in box]
 
-                out.append({
+                values.append({
                     "value": value,
                     "x": np.mean(xs),
                     "y": np.mean(ys),
@@ -85,55 +126,73 @@ def easyocr_numbers(img):
             except:
                 pass
 
-    return out
+    return values
 
 
-def extract_sondage(img):
-    arr = np.array(img)
+def get_zone_values(
+    values,
+    x1,
+    x2,
+    y1,
+    y2,
+    min_value,
+    max_value
+):
 
-    results = reader.readtext(arr, detail=0)
-
-    text = " ".join(results)
-
-    m = re.search(r"(SP[_\-]?[A-Za-z]+[_\-]?\d+)", text)
-
-    if m:
-        return m.group(1)
-
-    return "NON_DETECTE"
-
-
-def get_values_in_zone(values, x1, x2, y1, y2, vmin, vmax):
     out = []
 
     for v in values:
+
         if (
             x1 <= v["x"] <= x2
             and y1 <= v["y"] <= y2
-            and vmin <= v["value"] <= vmax
+            and min_value <= v["value"] <= max_value
         ):
+
             out.append(v)
 
     return sorted(out, key=lambda v: v["y"])
 
 
-def group_triplets(pf, pl, em, tolerance=35):
+def group_triplets(
+    pf_values,
+    pl_values,
+    em_values,
+    tolerance=35
+):
+
     rows = []
 
-    for p in pf:
-        y = p["y"]
+    for pf in pf_values:
 
-        pl_match = min(pl, key=lambda v: abs(v["y"] - y), default=None)
-        em_match = min(em, key=lambda v: abs(v["y"] - y), default=None)
+        y = pf["y"]
+
+        pl_match = min(
+            pl_values,
+            key=lambda v: abs(v["y"] - y),
+            default=None
+        )
+
+        em_match = min(
+            em_values,
+            key=lambda v: abs(v["y"] - y),
+            default=None
+        )
 
         if pl_match and em_match:
+
             if (
                 abs(pl_match["y"] - y) <= tolerance
                 and abs(em_match["y"] - y) <= tolerance
             ):
+
                 rows.append({
-                    "y": np.mean([y, pl_match["y"], em_match["y"]]),
-                    "Pf": p["value"],
+                    "y": np.mean([
+                        pf["y"],
+                        pl_match["y"],
+                        em_match["y"]
+                    ]),
+                    "Pf": pf["value"],
                     "Pl": pl_match["value"],
                     "EM": em_match["value"],
                 })
@@ -141,8 +200,17 @@ def group_triplets(pf, pl, em, tolerance=35):
     return rows
 
 
-def depth_from_y(y, y0, y16):
-    depth = (y - y0) / (y16 - y0) * 16
+def depth_from_y(
+    y,
+    y0,
+    y16
+):
+
+    depth = (
+        (y - y0)
+        / (y16 - y0)
+    ) * 16
+
     return round(depth, 1)
 
 
@@ -153,7 +221,10 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file:
 
-    pages = pdf_to_images(uploaded_file, zoom=4)
+    pages = pdf_to_images(
+        uploaded_file,
+        zoom=4
+    )
 
     first_img = pages[0][1]
 
@@ -232,7 +303,10 @@ if uploaded_file:
         4
     )
 
-    st.image(preview, use_container_width=True)
+    st.image(
+        preview,
+        use_container_width=True
+    )
 
     if st.button("Extraire Excel"):
 
@@ -242,9 +316,9 @@ if uploaded_file:
 
             sondage = extract_sondage(img)
 
-            values = easyocr_numbers(img)
+            values = extract_all_numbers(img)
 
-            pf = get_values_in_zone(
+            pf_values = get_zone_values(
                 values,
                 pf_x1,
                 pf_x2,
@@ -254,7 +328,7 @@ if uploaded_file:
                 20
             )
 
-            pl = get_values_in_zone(
+            pl_values = get_zone_values(
                 values,
                 pl_x1,
                 pl_x2,
@@ -264,7 +338,7 @@ if uploaded_file:
                 20
             )
 
-            em = get_values_in_zone(
+            em_values = get_zone_values(
                 values,
                 em_x1,
                 em_x2,
@@ -274,31 +348,35 @@ if uploaded_file:
                 10000
             )
 
-            triplets = group_triplets(
-                pf,
-                pl,
-                em,
+            rows = group_triplets(
+                pf_values,
+                pl_values,
+                em_values,
                 tolerance
             )
 
-            for t in triplets:
+            for r in rows:
 
                 final_rows.append({
                     "Sondage": sondage,
                     "Profondeur": depth_from_y(
-                        t["y"],
+                        r["y"],
                         y0,
                         y16
                     ),
-                    "Pf": t["Pf"],
-                    "Pl": t["Pl"],
-                    "EM": t["EM"],
+                    "Pf": r["Pf"],
+                    "Pl": r["Pl"],
+                    "EM": r["EM"],
                 })
 
         df = pd.DataFrame(final_rows)
 
         if df.empty:
-            st.error("Aucune donnée détectée.")
+
+            st.error(
+                "Aucune donnée détectée."
+            )
+
         else:
 
             df = df.sort_values(
