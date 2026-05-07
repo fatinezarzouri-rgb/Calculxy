@@ -1,122 +1,124 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-from PIL import Image
+import re
 from io import BytesIO
-from sklearn.cluster import KMeans
 
-st.set_page_config(page_title="Pourcentage formations", page_icon="📊")
-st.title("📊 Calcul des pourcentages des formations depuis une image")
+import pandas as pd
+import pdfplumber
+import streamlit as st
 
-uploaded = st.file_uploader("Importer l’image découpée des formations", type=["png", "jpg", "jpeg"])
 
-def crop_image(img, x1, x2, y1, y2):
-    return img.crop((x1, y1, x2, y2))
-
-def rgb_distance(a, b):
-    return np.sqrt(np.sum((a - b) ** 2, axis=2))
-
-def get_dominant_colors(img, n_colors):
-    arr = np.array(img.convert("RGB"))
-    pixels = arr.reshape(-1, 3)
-
-    # enlever fond sombre, blanc, gris très faible
-    brightness = pixels.mean(axis=1)
-    saturation = pixels.max(axis=1) - pixels.min(axis=1)
-    keep = (brightness > 35) & (brightness < 245) & (saturation > 20)
-
-    pixels = pixels[keep]
-
-    if len(pixels) > 60000:
-        idx = np.random.choice(len(pixels), 60000, replace=False)
-        pixels = pixels[idx]
-
-    model = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
-    model.fit(pixels)
-
-    return model.cluster_centers_.astype(int)
-
-def calculate_percentages(img, colors, names, tolerance):
-    arr = np.array(img.convert("RGB")).astype(int)
-    assigned = np.zeros(arr.shape[:2], dtype=bool)
-
+# =========================================
+# EXTRACTION DES DONNÉES
+# =========================================
+def extract_pl_em_from_pdf(pdf_file):
     rows = []
 
-    for color, name in zip(colors, names):
-        color = np.array(color).astype(int)
-        dist = rgb_distance(arr, color)
-        mask = (dist <= tolerance) & (~assigned)
+    with pdfplumber.open(pdf_file) as pdf:
 
-        pixels = int(mask.sum())
-        assigned |= mask
+        for page_number, page in enumerate(pdf.pages, start=1):
 
-        rows.append({
-            "Formation": name,
-            "RGB": tuple(color.tolist()),
-            "Pixels": pixels
-        })
+            text = page.extract_text()
 
-    total = sum(r["Pixels"] for r in rows)
+            if not text:
+                continue
 
-    for r in rows:
-        r["Pourcentage (%)"] = round(r["Pixels"] / total * 100, 2) if total else 0
+            lines = text.split("\n")
 
-    return pd.DataFrame(rows).sort_values("Pourcentage (%)", ascending=False)
+            for line in lines:
 
-if uploaded:
-    img = Image.open(uploaded).convert("RGB")
-    w, h = img.size
+                # Extraire tous les nombres
+                numbers = re.findall(r"\d+[.,]?\d*", line)
 
-    st.image(img, caption="Image originale", use_container_width=True)
+                # On cherche minimum 3 valeurs :
+                # profondeur + pL + EM
+                if len(numbers) >= 3:
 
-    st.subheader("1. Découper la zone utile")
+                    try:
+                        profondeur = float(numbers[0].replace(",", "."))
+                        pl = float(numbers[-2].replace(",", "."))
+                        em = float(numbers[-1].replace(",", "."))
 
-    x1 = st.slider("X début", 0, w, 0)
-    x2 = st.slider("X fin", 0, w, w)
-    y1 = st.slider("Y début", 0, h, 0)
-    y2 = st.slider("Y fin", 0, h, h)
+                        rows.append({
+                            "Page": page_number,
+                            "Profondeur (m)": profondeur,
+                            "pL": pl,
+                            "EM": em,
+                            "Ligne originale": line
+                        })
 
-    cropped = crop_image(img, x1, x2, y1, y2)
-    st.image(cropped, caption="Zone analysée", use_container_width=True)
+                    except:
+                        pass
 
-    st.subheader("2. Détection des couleurs")
+    df = pd.DataFrame(rows)
 
-    n_colors = st.slider("Nombre de formations/couleurs", 2, 10, 5)
-    tolerance = st.slider("Tolérance couleur", 10, 100, 35)
+    return df
 
-    if st.button("Détecter les couleurs"):
-        st.session_state.colors = get_dominant_colors(cropped, n_colors)
 
-    if "colors" in st.session_state:
-        names = []
+# =========================================
+# EXPORT EXCEL
+# =========================================
+def convert_to_excel(df):
 
-        for i, color in enumerate(st.session_state.colors):
-            col1, col2 = st.columns([1, 4])
+    output = BytesIO()
 
-            with col1:
-                color_img = np.zeros((60, 120, 3), dtype=np.uint8)
-                color_img[:, :] = color
-                st.image(color_img)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Extraction")
 
-            with col2:
-                name = st.text_input(f"Nom formation {i+1}", value=f"Formation_{i+1}")
-                names.append(name)
+    output.seek(0)
 
-        if st.button("Calculer les pourcentages"):
-            df = calculate_percentages(cropped, st.session_state.colors, names, tolerance)
+    return output
 
-            st.success("Calcul terminé ✔️")
-            st.dataframe(df)
 
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name="Pourcentages", index=False)
+# =========================================
+# INTERFACE STREAMLIT
+# =========================================
+st.set_page_config(
+    page_title="Extracteur pL / EM",
+    layout="centered"
+)
 
-            output.seek(0)
+st.title("📄 Extracteur pL / EM")
 
-            st.download_button(
-                "📥 Télécharger Excel",
-                data=output,
-                file_name="pourcentage_formations.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+st.write(
+    """
+    Importe un PDF pressiométrique  
+    puis télécharge automatiquement le fichier Excel.
+    """
+)
+
+# =========================================
+# IMPORT PDF
+# =========================================
+uploaded_pdf = st.file_uploader(
+    "Importer un PDF",
+    type=["pdf"]
+)
+
+# =========================================
+# TRAITEMENT
+# =========================================
+if uploaded_pdf is not None:
+
+    st.info("Extraction en cours...")
+
+    df = extract_pl_em_from_pdf(uploaded_pdf)
+
+    if df.empty:
+
+        st.error("❌ Aucune donnée détectée.")
+
+    else:
+
+        st.success("✔️ Extraction terminée")
+
+        # Affichage tableau
+        st.dataframe(df, use_container_width=True)
+
+        # Excel
+        excel_file = convert_to_excel(df)
+
+        st.download_button(
+            label="📥 Télécharger Excel",
+            data=excel_file,
+            file_name="extraction_pL_EM.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
