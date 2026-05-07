@@ -1,74 +1,94 @@
 import re
+import fitz  # PyMuPDF
+import pytesseract
+import pandas as pd
+from PIL import Image
+import streamlit as st
 from io import BytesIO
 
-import fitz
-import pandas as pd
-import streamlit as st
 
+def pdf_to_images(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    images = []
 
-st.set_page_config(page_title="PDF vers Excel", layout="wide")
-st.title("Extraction des sondages PDF vers Excel")
+    for page in doc:
+        pix = page.get_pixmap(dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+
+    return images
 
 
 def clean_number(value):
-    return value.replace(" ", "").replace(",", ".")
+    value = value.replace(" ", "").replace(",", ".")
+    return float(value)
 
 
-def extract_data(text, page_number):
-    sondage_match = re.search(r"Sondage\s*[:\-]?\s*([A-Za-z0-9_]+)", text)
-    x_match = re.search(r"X\s*[:\-]?\s*([\d\s.,]+)", text)
-    y_match = re.search(r"Y\s*[:\-]?\s*([\d\s.,]+)", text)
+def extract_data(text):
+    sondage = None
+    x = None
+    y = None
 
-    if not sondage_match:
-        return None
+    sondage_match = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-]+)", text)
+    if sondage_match:
+        sondage = sondage_match.group(1)
+
+    x_match = re.search(r"X\s*:\s*([\d\s]+[,\.]\d+)", text)
+    y_match = re.search(r"Y\s*:\s*([\d\s]+[,\.]\d+)", text)
+
+    if x_match:
+        x = clean_number(x_match.group(1))
+
+    if y_match:
+        y = clean_number(y_match.group(1))
 
     return {
-        "Page": page_number,
-        "Nom sondage": sondage_match.group(1),
-        "X": clean_number(x_match.group(1)) if x_match else "",
-        "Y": clean_number(y_match.group(1)) if y_match else "",
+        "Nom sondage": sondage,
+        "X": x,
+        "Y": y
     }
 
 
-pdf_file = st.file_uploader("Importer un fichier PDF", type=["pdf"])
+def create_excel(data):
+    df = pd.DataFrame(data)
 
-if pdf_file:
-    try:
-        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        results = []
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sondages")
 
-        progress = st.progress(0)
+    output.seek(0)
+    return output
 
-        for i, page in enumerate(doc):
-            text = page.get_text()
-            row = extract_data(text, i + 1)
 
-            if row:
-                results.append(row)
+st.title("Extraction PDF vers Excel")
+st.write("Importer un PDF scanné/non sélectionnable pour extraire le nom du sondage, X et Y.")
 
-            progress.progress((i + 1) / len(doc))
+uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
-        if results:
-            df = pd.DataFrame(results)
-            st.success(f"{len(df)} sondages trouvés")
-            st.dataframe(df, width="stretch")
+if uploaded_pdf:
+    results = []
 
-            output = BytesIO()
+    images = pdf_to_images(uploaded_pdf)
 
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Sondages")
+    for i, image in enumerate(images, start=1):
+        text = pytesseract.image_to_string(image, lang="fra+eng")
+        row = extract_data(text)
+        row["Page"] = i
 
-            output.seek(0)
+        if row["Nom sondage"] or row["X"] or row["Y"]:
+            results.append(row)
 
-            st.download_button(
-                label="Télécharger Excel",
-                data=output,
-                file_name="sondages.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.warning("Aucun sondage trouvé dans le PDF.")
+    if results:
+        df = pd.DataFrame(results)
+        st.dataframe(df)
 
-    except Exception as e:
-        st.error("Erreur pendant le traitement du PDF")
-        st.code(str(e))
+        excel_file = create_excel(results)
+
+        st.download_button(
+            label="Télécharger Excel",
+            data=excel_file,
+            file_name="sondages.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("Aucune donnée trouvée.")
