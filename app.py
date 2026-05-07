@@ -3,7 +3,7 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
-from pypdf import PdfReader
+from PyPDF2 import PdfReader
 
 
 # ==========================================
