@@ -1,3 +1,4 @@
+import os
 import re
 import tempfile
 from io import BytesIO
@@ -10,12 +11,16 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 st.set_page_config(page_title="Extraction Pressiomètre", layout="wide")
 st.title("Extraction automatique Pf / Pl / EM")
 
+@st.cache_resource
+def load_reader():
+    return easyocr.Reader(["en"], gpu=False)
 
-reader = easyocr.Reader(["en"], gpu=False)
+reader = load_reader()
 
 
 def pdf_to_images(uploaded_file, zoom=4):
