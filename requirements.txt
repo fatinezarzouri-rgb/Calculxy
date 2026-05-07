@@ -4,7 +4,5 @@ openpyxl
 PyMuPDF
 Pillow
 opencv-python-headless
-numpy
+numpy<2
 easyocr
-torch
-torchvision
