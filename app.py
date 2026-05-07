@@ -11,7 +11,7 @@ from PIL import Image, ImageFilter
 st.set_page_config(page_title="Extraction X Y des sondages", layout="wide")
 
 
-def render_page(doc, page_index: int, zoom: float = 3.0):
+def render_page(doc, page_index: int, zoom: float = 3.5):
     page = doc[page_index]
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -22,20 +22,27 @@ def ocr_variants(crop: Image.Image):
     return [
         gray,
         gray.resize((gray.width * 3, gray.height * 3)),
-        gray.point(lambda p: 255 if p > 185 else 0).resize((gray.width * 3, gray.height * 3)),
-        gray.point(lambda p: 255 if p > 160 else 0).resize((gray.width * 3, gray.height * 3)),
+        gray.point(lambda p: 255 if p > 190 else 0).resize((gray.width * 3, gray.height * 3)),
+        gray.point(lambda p: 255 if p > 165 else 0).resize((gray.width * 3, gray.height * 3)),
         gray.filter(ImageFilter.SHARPEN).resize((gray.width * 4, gray.height * 4)),
     ]
+
+
+def normalize_num(s: str) -> str:
+    s = s.strip()
+    s = s.replace(" ", "")
+    s = s.replace(".", ",") if "." in s and "," not in s else s
+    return s
 
 
 def detect_sondage(page_img: Image.Image):
     w, h = page_img.size
 
-    # bloc "Date / Sondage / Machine / Profondeur"
+    # bloc Date / Sondage / Machine / Profondeur
     crops = [
-        (0.34, 0.66, 0.16, 0.25),
-        (0.32, 0.68, 0.15, 0.26),
-        (0.30, 0.70, 0.15, 0.27),
+        (0.33, 0.67, 0.16, 0.24),
+        (0.31, 0.69, 0.15, 0.25),
+        (0.30, 0.70, 0.15, 0.26),
     ]
 
     for bx1, bx2, by1, by2 in crops:
@@ -61,10 +68,10 @@ def detect_sondage(page_img: Image.Image):
 def detect_xy(page_img: Image.Image):
     w, h = page_img.size
 
-    # bloc en haut à droite : Coordonnées / X / Y
+    # bloc Coordonnées / X / Y en haut à droite
     crops = [
-        (0.78, 0.98, 0.15, 0.24),
-        (0.76, 0.98, 0.14, 0.25),
+        (0.77, 0.98, 0.15, 0.24),
+        (0.75, 0.99, 0.14, 0.25),
         (0.74, 0.99, 0.14, 0.26),
     ]
 
@@ -80,26 +87,31 @@ def detect_xy(page_img: Image.Image):
                 txt = txt.replace("\n", " ")
                 txt = re.sub(r"\s+", " ", txt)
 
+                # on cherche X et Y séparément, sans fallback aveugle
                 if not best_x:
-                    m = re.search(r"X\s*:\s*([0-9]+[.,][0-9]+)", txt, flags=re.IGNORECASE)
+                    m = re.search(r"X\s*:\s*([0-9]{5,7}[.,][0-9]+)", txt, flags=re.IGNORECASE)
                     if m:
-                        best_x = m.group(1).strip()
+                        best_x = normalize_num(m.group(1))
 
                 if not best_y:
-                    m = re.search(r"Y\s*:\s*([0-9]+[.,][0-9]+)", txt, flags=re.IGNORECASE)
+                    m = re.search(r"Y\s*:\s*([0-9]{5,7}[.,][0-9]+)", txt, flags=re.IGNORECASE)
                     if m:
-                        best_y = m.group(1).strip()
+                        best_y = normalize_num(m.group(1))
 
-                # secours si OCR mange le X: ou Y:
-                if not best_x:
-                    nums = re.findall(r"([0-9]{5,7}[.,][0-9]+)", txt)
-                    if len(nums) >= 1:
-                        best_x = nums[0]
+                # secours OCR si X: ou Y: mal lus
+                if not best_x or not best_y:
+                    lines = [x.strip() for x in txt.split("  ") if x.strip()]
+                    joined = " | ".join(lines)
 
-                if not best_y:
-                    nums = re.findall(r"([0-9]{5,7}[.,][0-9]+)", txt)
-                    if len(nums) >= 2:
-                        best_y = nums[1]
+                    if not best_x:
+                        m = re.search(r"\bX\b[^0-9]{0,6}([0-9]{5,7}[.,][0-9]+)", joined, flags=re.IGNORECASE)
+                        if m:
+                            best_x = normalize_num(m.group(1))
+
+                    if not best_y:
+                        m = re.search(r"\bY\b[^0-9]{0,6}([0-9]{5,7}[.,][0-9]+)", joined, flags=re.IGNORECASE)
+                        if m:
+                            best_y = normalize_num(m.group(1))
 
                 if best_x and best_y:
                     return best_x, best_y
@@ -116,7 +128,7 @@ def extract_xy(pdf_bytes: bytes):
     undetected = []
 
     for i in range(len(doc)):
-        img = render_page(doc, i, zoom=3.0)
+        img = render_page(doc, i, zoom=3.5)
 
         sondage = detect_sondage(img)
         x_val, y_val = detect_xy(img)
@@ -135,7 +147,7 @@ def extract_xy(pdf_bytes: bytes):
 
     if not df.empty:
         df = df.sort_values("Page").drop_duplicates(subset=["Sondage"], keep="first")
-        df = df[["Sondage", "X", "Y", "Page"]]
+        df = df[["Sondage", "X", "Y"]]
 
     return df, undetected
 
@@ -175,6 +187,5 @@ if st.button("Lancer l'extraction", type="primary"):
                     file_name="sondages_xy.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
         except Exception as e:
             st.exception(e)
