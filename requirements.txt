@@ -1,4 +1,6 @@
 streamlit
 pandas
 openpyxl
-PyMuPDF
+pytesseract
+pdf2image
+Pillow
