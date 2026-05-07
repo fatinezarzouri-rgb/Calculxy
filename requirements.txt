@@ -6,3 +6,5 @@ Pillow
 opencv-python-headless
 numpy<2
 easyocr==1.7.2
+torch
+torchvision
