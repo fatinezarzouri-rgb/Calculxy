@@ -3,21 +3,15 @@ from io import BytesIO
 
 import fitz
 import pandas as pd
-import pytesseract
 import streamlit as st
-from PIL import Image
 
 
-st.set_page_config(page_title="PDF OCR vers Excel")
+st.set_page_config(page_title="PDF vers Excel")
 
 st.title("Extraction PDF vers Excel")
 
 
 def clean_number(value):
-
-    if not value:
-        return None
-
     value = value.replace(" ", "")
     value = value.replace(",", ".")
 
@@ -34,24 +28,21 @@ def extract_data(text):
     y = None
 
     sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
-        text,
-        re.IGNORECASE
+        r"Sondage\s*:\s*([A-Za-z0-9_\-]+)",
+        text
     )
 
     if sondage_match:
         sondage = sondage_match.group(1)
 
     x_match = re.search(
-        r"X\s*[:\-]?\s*([\d\s,.]+)",
-        text,
-        re.IGNORECASE
+        r"X\s*:\s*([\d\s,\.]+)",
+        text
     )
 
     y_match = re.search(
-        r"Y\s*[:\-]?\s*([\d\s,.]+)",
-        text,
-        re.IGNORECASE
+        r"Y\s*:\s*([\d\s,\.]+)",
+        text
     )
 
     if x_match:
@@ -76,8 +67,10 @@ if uploaded_pdf:
 
     try:
 
+        pdf_bytes = uploaded_pdf.read()
+
         doc = fitz.open(
-            stream=uploaded_pdf.read(),
+            stream=pdf_bytes,
             filetype="pdf"
         )
 
@@ -87,20 +80,7 @@ if uploaded_pdf:
 
         for i, page in enumerate(doc):
 
-            # DPI réduit = moins mémoire
-            pix = page.get_pixmap(dpi=120)
-
-            img = Image.frombytes(
-                "RGB",
-                [pix.width, pix.height],
-                pix.samples
-            )
-
-            text = pytesseract.image_to_string(
-                img,
-                lang="eng",
-                config="--psm 6"
-            )
+            text = page.get_text()
 
             row = extract_data(text)
 
@@ -108,10 +88,6 @@ if uploaded_pdf:
 
             if row["Nom sondage"]:
                 results.append(row)
-
-            # libérer mémoire
-            del pix
-            del img
 
             progress.progress((i + 1) / len(doc))
 
@@ -121,7 +97,7 @@ if uploaded_pdf:
 
             st.success(f"{len(df)} sondages trouvés")
 
-            st.dataframe(df)
+            st.dataframe(df, width="stretch")
 
             output = BytesIO()
 
@@ -138,14 +114,14 @@ if uploaded_pdf:
             output.seek(0)
 
             st.download_button(
-                "Télécharger Excel",
-                output,
+                label="Télécharger Excel",
+                data=output,
                 file_name="sondages.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         else:
-            st.warning("Aucun résultat trouvé")
+            st.warning("Aucune donnée trouvée")
 
     except Exception as e:
 
