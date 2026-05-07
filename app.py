@@ -1,10 +1,7 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import re
 from io import BytesIO
-from PIL import Image
-import cv2
 
 st.set_page_config(
     page_title="Extraction Géotechnique",
@@ -13,157 +10,8 @@ st.set_page_config(
 )
 
 st.title("🏗️ Application d'Extraction Géotechnique")
-st.markdown("### Extraction depuis graphique avec interpolation des profondeurs")
+st.markdown("### Extraction des valeurs pL et EM - Copier/Coller depuis PDF")
 st.markdown("---")
-
-def interpoler_profondeur(y1, y2, x_interp, x1, x2):
-    """Interpolation linéaire pour trouver la profondeur"""
-    if x2 == x1:
-        return y1
-    return y1 + (y2 - y1) * (x_interp - x1) / (x2 - x1)
-
-def extraire_depuis_texte_avec_interpolation(texte):
-    """Extraction avec interpolation entre les graduations"""
-    donnees = []
-    sondage_actuel = None
-    
-    # Chercher les graduations de profondeur (1, 2, 3, 4, 5...)
-    pattern_profondeur = r'\b([1-9]|10|11|12|13|14|15)\b'
-    
-    # Chercher les valeurs pL et EM
-    pattern_valeurs = r'(\d+\.?\d*)'
-    
-    lignes = texte.split('\n')
-    
-    # Stocker les points trouvés
-    points = []
-    profondeurs_connues = []
-    
-    for i, ligne in enumerate(lignes):
-        # Trouver le nom du sondage
-        sondage_match = re.search(r'(SP[-_]?[Rr]eta[-_]?\d{3})', ligne)
-        if sondage_match:
-            if points and sondage_actuel:
-                # Traiter les points du sondage précédent
-                for point in points:
-                    donnees.append([sondage_actuel, point[0], point[1], point[2]])
-            sondage_actuel = sondage_match.group(1)
-            points = []
-            profondeurs_connues = []
-            continue
-        
-        # Trouver les profondeurs graduées (1,2,3,4,5...)
-        prof_match = re.findall(r'\b([1-9]|10|11|12|13|14|15)\b', ligne)
-        if prof_match and len(prof_match) >= 2:
-            for prof in prof_match:
-                prof_int = int(prof)
-                if prof_int not in profondeurs_connues:
-                    profondeurs_connues.append(prof_int)
-        
-        # Trouver les valeurs pL et EM (deux nombres proches)
-        nombres = re.findall(pattern_valeurs, ligne)
-        
-        if len(nombres) >= 2:
-            try:
-                val1 = float(nombres[0])
-                val2 = float(nombres[1])
-                
-                # Déterminer quelle valeur est pL (0.5-50) et EM (10-5000)
-                if 0.5 <= val1 <= 50 and 10 <= val2 <= 5000:
-                    pl, em = val1, val2
-                elif 0.5 <= val2 <= 50 and 10 <= val1 <= 5000:
-                    pl, em = val2, val1
-                else:
-                    continue
-                
-                # Trouver la position approximative (ligne)
-                position_y = i
-                
-                # Interpoler la profondeur
-                if len(profondeurs_connues) >= 2:
-                    # Trouver les deux graduations encadrantes
-                    min_prof = min(profondeurs_connues)
-                    max_prof = max(profondeurs_connues)
-                    
-                    # Interpolation simple: profondeur = position relative
-                    prof_interpol = round(min_prof + (max_prof - min_prof) * 0.5, 1)
-                    
-                    points.append([prof_interpol, pl, em])
-                    
-            except:
-                pass
-    
-    # Dernier sondage
-    if points and sondage_actuel:
-        for point in points:
-            donnees.append([sondage_actuel, point[0], point[1], point[2]])
-    
-    if donnees:
-        df = pd.DataFrame(donnees, columns=['Sondage', 'Profondeur (m)', 'pL (MPa)', 'EM (MPa)'])
-        # Grouper par profondeur et prendre la moyenne si doublons
-        df = df.groupby(['Sondage', 'Profondeur (m)'], as_index=False).agg({
-            'pL (MPa)': 'mean',
-            'EM (MPa)': 'mean'
-        })
-        df = df.sort_values(['Sondage', 'Profondeur (m)'])
-        return df
-    
-    return pd.DataFrame()
-
-def extraire_donnees_votre_format(texte):
-    """Extraction spécifique pour votre format de logs"""
-    donnees = []
-    sondage_actuel = None
-    
-    # Liste des profondeurs standards
-    profondeurs_standard = [1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0, 13.5, 15.0]
-    
-    lignes = texte.split('\n')
-    
-    for ligne in lignes:
-        ligne = ligne.strip()
-        
-        # Chercher sondage
-        if 'SP_Reta' in ligne:
-            match = re.search(r'(SP_Reta_\d{3})', ligne)
-            if match:
-                sondage_actuel = match.group(1)
-            continue
-        
-        # Chercher les triplets
-        nombres = re.findall(r'\b(\d+\.?\d*)\b', ligne)
-        
-        if len(nombres) == 3 and sondage_actuel:
-            try:
-                p1 = float(nombres[0])
-                p2 = float(nombres[1])
-                p3 = float(nombres[2])
-                
-                # Identifier profondeur, pl, em
-                # Cas où p1 est la profondeur
-                if p1 in profondeurs_standard:
-                    if 0.5 <= p2 <= 50 and 10 <= p3 <= 5000:
-                        donnees.append([sondage_actuel, p1, p2, p3])
-                    elif 0.5 <= p3 <= 50 and 10 <= p2 <= 5000:
-                        donnees.append([sondage_actuel, p1, p3, p2])
-                # Cas où la profondeur n'est pas standard mais plausible
-                elif 0.5 <= p1 <= 50:
-                    if 0.5 <= p2 <= 50 and 10 <= p3 <= 5000:
-                        # Arrondir la profondeur au 0.5 le plus proche
-                        prof_arrondie = round(p1 * 2) / 2
-                        donnees.append([sondage_actuel, prof_arrondie, p2, p3])
-                    elif 0.5 <= p3 <= 50 and 10 <= p2 <= 5000:
-                        prof_arrondie = round(p1 * 2) / 2
-                        donnees.append([sondage_actuel, prof_arrondie, p3, p2])
-            except:
-                pass
-    
-    if donnees:
-        df = pd.DataFrame(donnees, columns=['Sondage', 'Profondeur (m)', 'pL (MPa)', 'EM (MPa)'])
-        df = df.drop_duplicates(subset=['Sondage', 'Profondeur (m)'])
-        df = df.sort_values(['Sondage', 'Profondeur (m)'])
-        return df
-    return pd.DataFrame()
 
 def generer_excel(df):
     """Génère Excel avec 4 colonnes"""
@@ -175,70 +23,137 @@ def generer_excel(df):
     output.seek(0)
     return output
 
-# Interface
+def extraire_donnees(texte):
+    """Extraction des données depuis le texte copié"""
+    donnees = []
+    sondage_actuel = None
+    
+    profondeurs_standard = [1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0, 13.5, 15.0]
+    
+    lignes = texte.split('\n')
+    
+    for ligne in lignes:
+        ligne = ligne.strip()
+        
+        if 'SP_Reta' in ligne or 'SP_' in ligne:
+            match = re.search(r'(SP[-_]?[Rr]eta[-_]?\d{3}|SP[-_]?\d{3})', ligne)
+            if match:
+                sondage_actuel = match.group(1)
+            continue
+        
+        nombres = re.findall(r'\b(\d+\.?\d*)\b', ligne)
+        
+        if len(nombres) == 3 and sondage_actuel:
+            try:
+                v1 = float(nombres[0])
+                v2 = float(nombres[1])
+                v3 = float(nombres[2])
+                
+                prof = None
+                pl = None
+                em = None
+                
+                if v1 in profondeurs_standard or (0.5 <= v1 <= 50):
+                    if 0.5 <= v2 <= 50 and 10 <= v3 <= 5000:
+                        prof, pl, em = v1, v2, v3
+                    elif 0.5 <= v3 <= 50 and 10 <= v2 <= 5000:
+                        prof, pl, em = v1, v3, v2
+                
+                if prof is None and (v2 in profondeurs_standard or (0.5 <= v2 <= 50)):
+                    if 0.5 <= v1 <= 50 and 10 <= v3 <= 5000:
+                        prof, pl, em = v2, v1, v3
+                    elif 0.5 <= v3 <= 50 and 10 <= v1 <= 5000:
+                        prof, pl, em = v2, v3, v1
+                
+                if prof is None and (v3 in profondeurs_standard or (0.5 <= v3 <= 50)):
+                    if 0.5 <= v1 <= 50 and 10 <= v2 <= 5000:
+                        prof, pl, em = v3, v1, v2
+                    elif 0.5 <= v2 <= 50 and 10 <= v1 <= 5000:
+                        prof, pl, em = v3, v2, v1
+                
+                if prof is not None and pl is not None and em is not None:
+                    if prof not in profondeurs_standard:
+                        prof = min(profondeurs_standard, key=lambda x: abs(x - prof))
+                    
+                    donnees.append([sondage_actuel, round(prof, 1), round(pl, 2), round(em, 1)])
+                    
+            except (ValueError, IndexError):
+                pass
+    
+    if donnees:
+        df = pd.DataFrame(donnees, columns=['Sondage', 'Profondeur (m)', 'pL (MPa)', 'EM (MPa)'])
+        df = df.drop_duplicates(subset=['Sondage', 'Profondeur (m)'])
+        df = df.sort_values(['Sondage', 'Profondeur (m)'])
+        return df
+    
+    return pd.DataFrame()
+
 st.info("""
-### 📖 Instructions:
-1. Copiez le texte extrait de votre PDF (les logs)
-2. Collez-le dans la zone ci-dessous
-3. L'application va:
-   - Identifier chaque sondage (SP_Reta_XXX)
-   - Extraire les triplets (profondeur, pL, EM)
-   - Interpoler les profondeurs manquantes
-   - Générer un Excel avec 4 colonnes
+**Comment utiliser:**
+1. Ouvrez votre PDF dans un lecteur
+2. Sélectionnez tout le texte (Ctrl+A)
+3. Copiez le texte (Ctrl+C)
+4. Collez le texte ci-dessous (Ctrl+V)
+5. Cliquez sur "Extraire les données"
+6. Téléchargez l'Excel
 """)
 
-# Zone de texte pour copier/coller
 texte_logs = st.text_area(
-    "📝 Collez ici les logs extraits du PDF:",
+    "Collez ici le texte copié depuis votre PDF:",
     height=300,
-    placeholder="Exemple:\nSP_Reta_043\n1.5 1.17 25.1\n3.0 1.36 30.6\n4.5 2.56 65.1\n\nSP_Reta_044\n1.5 1.85 29.5\n3.0 3.46 65.3\n4.5 3.56 63.4"
+    placeholder="SP_Reta_043\n1.5 1.17 25.1\n3.0 1.36 30.6\n4.5 2.56 65.1\n\nSP_Reta_044\n1.5 1.85 29.5\n3.0 3.46 65.3"
 )
 
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("🔄 Extraire les données", use_container_width=True):
-        if texte_logs:
+    if st.button("Extraire les données", use_container_width=True):
+        if texte_logs and texte_logs.strip():
             with st.spinner("Extraction en cours..."):
-                # Essayer les deux méthodes
-                df = extraire_donnees_votre_format(texte_logs)
-                
-                if df.empty:
-                    df = extraire_depuis_texte_avec_interpolation(texte_logs)
+                df = extraire_donnees(texte_logs)
                 
                 if not df.empty:
                     st.session_state['df_extrait'] = df
-                    st.success(f"✅ Extraction réussie: {len(df)} lignes")
+                    st.success(f"Extraction reussie: {len(df)} lignes trouvees")
                 else:
-                    st.error("❌ Aucune donnée trouvée. Vérifiez le format.")
+                    st.error("Aucune donnee trouvee. Verifiez le format.")
         else:
-            st.warning("Veuillez coller des données")
+            st.warning("Veuillez coller du texte")
 
 with col2:
     if 'df_extrait' in st.session_state and st.session_state['df_extrait'] is not None:
-        excel_file = generer_excel(st.session_state['df_extrait'])
+        df = st.session_state['df_extrait']
+        excel_file = generer_excel(df)
         st.download_button(
-            label="📥 Télécharger Excel",
+            label="Telecharger Excel",
             data=excel_file,
             file_name="donnees_geotechniques.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
-# Affichage des résultats
 if 'df_extrait' in st.session_state and st.session_state['df_extrait'] is not None:
     st.markdown("---")
-    st.subheader("📊 Résultats extraits")
+    st.subheader("Resultats extraits")
     
     df = st.session_state['df_extrait']
     
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total mesures", len(df))
+    with col2:
+        st.metric("Nombre de sondages", len(df['Sondage'].unique()))
+    with col3:
+        st.metric("Profondeur max", f"{df['Profondeur (m)'].max()} m")
+    
     st.dataframe(df, use_container_width=True, hide_index=True)
     
-    # Graphiques
-    st.subheader("📈 Visualisation")
+    st.subheader("Visualisation par sondage")
+    
     for sondage in df['Sondage'].unique():
         with st.expander(f"Sondage: {sondage}"):
             sondage_df = df[df['Sondage'] == sondage].sort_values('Profondeur (m)')
+            st.dataframe(sondage_df, hide_index=True, use_container_width=True)
             
             col1, col2 = st.columns(2)
             with col1:
@@ -247,11 +162,19 @@ if 'df_extrait' in st.session_state and st.session_state['df_extrait'] is not No
             with col2:
                 st.write("**EM (MPa)**")
                 st.line_chart(sondage_df.set_index('Profondeur (m)')['EM (MPa)'])
+    
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label="Telecharger CSV",
+        data=csv,
+        file_name="donnees_geotechniques.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
-# Exemple
-with st.expander("📋 Voir un exemple de format accepté"):
-    st.code("""
-SP_Reta_043
+with st.expander("Charger un exemple"):
+    if st.button("Charger l'exemple"):
+        exemple = """SP_Reta_043
 1.5 1.17 25.1
 3.0 1.36 30.6
 4.5 2.56 65.1
@@ -273,5 +196,11 @@ SP_Reta_044
 10.5 7.42 1315.7
 12.0 7.44 1644.4
 13.5 7.46 1294.2
-15.0 7.48 2609.1
-    """)
+15.0 7.48 2609.1"""
+        st.session_state['exemple_charge'] = exemple
+        st.rerun()
+
+if 'exemple_charge' in st.session_state:
+    texte_logs = st.session_state['exemple_charge']
+    st.code(texte_logs)
+    st.info("Exemple charge! Cliquez sur 'Extraire les donnees'")
