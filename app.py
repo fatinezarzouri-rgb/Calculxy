@@ -17,59 +17,94 @@ def render_page(doc, page_index: int, zoom: float = 3.0):
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
 
-def detect_sondage_xy(page_img: Image.Image):
-    w, h = page_img.size
-
-    # Zone haute droite où se trouvent Sondage / X / Y sur les fiches Labotest
-    crops = [
-        (0.30, 0.96, 0.12, 0.28),
-        (0.28, 0.96, 0.12, 0.30),
-        (0.33, 0.98, 0.13, 0.27),
+def ocr_variants(crop: Image.Image):
+    gray = crop.convert("L")
+    return [
+        gray,
+        gray.resize((gray.width * 3, gray.height * 3)),
+        gray.point(lambda p: 255 if p > 185 else 0).resize((gray.width * 3, gray.height * 3)),
+        gray.point(lambda p: 255 if p > 160 else 0).resize((gray.width * 3, gray.height * 3)),
+        gray.filter(ImageFilter.SHARPEN).resize((gray.width * 4, gray.height * 4)),
     ]
 
-    best = {"Sondage": "", "X": "", "Y": ""}
+
+def detect_sondage(page_img: Image.Image):
+    w, h = page_img.size
+
+    # bloc "Date / Sondage / Machine / Profondeur"
+    crops = [
+        (0.34, 0.66, 0.16, 0.25),
+        (0.32, 0.68, 0.15, 0.26),
+        (0.30, 0.70, 0.15, 0.27),
+    ]
 
     for bx1, bx2, by1, by2 in crops:
         crop = page_img.crop((int(w * bx1), int(h * by1), int(w * bx2), int(h * by2)))
-        gray = crop.convert("L")
 
-        variants = [
-            gray,
-            gray.resize((gray.width * 3, gray.height * 3)),
-            gray.point(lambda p: 255 if p > 180 else 0).resize((gray.width * 3, gray.height * 3)),
-            gray.point(lambda p: 255 if p > 150 else 0).resize((gray.width * 3, gray.height * 3)),
-            gray.filter(ImageFilter.SHARPEN).resize((gray.width * 4, gray.height * 4)),
-        ]
-
-        for img in variants:
+        for img in ocr_variants(crop):
             for psm in [6, 11]:
                 txt = pytesseract.image_to_string(img, config=f"--psm {psm}")
                 txt = txt.replace("\n", " ")
                 txt = re.sub(r"\s+", " ", txt)
 
-                if not best["Sondage"]:
-                    m = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-/]+)", txt, flags=re.IGNORECASE)
-                    if not m:
-                        m = re.search(r"(SP[_\-]?(?:Rem|Reta)[_\-]?\d+)", txt, flags=re.IGNORECASE)
-                    if not m:
-                        m = re.search(r"(T\d+\-[A-Za-z0-9\-\+]+)", txt, flags=re.IGNORECASE)
-                    if m:
-                        best["Sondage"] = m.group(1).strip()
+                m = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-/]+)", txt, flags=re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
 
-                if not best["X"]:
+                m = re.search(r"(SP[_\-]?(?:Rem|Reta)[_\-]?\d+)", txt, flags=re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+
+    return ""
+
+
+def detect_xy(page_img: Image.Image):
+    w, h = page_img.size
+
+    # bloc en haut à droite : Coordonnées / X / Y
+    crops = [
+        (0.78, 0.98, 0.15, 0.24),
+        (0.76, 0.98, 0.14, 0.25),
+        (0.74, 0.99, 0.14, 0.26),
+    ]
+
+    best_x = ""
+    best_y = ""
+
+    for bx1, bx2, by1, by2 in crops:
+        crop = page_img.crop((int(w * bx1), int(h * by1), int(w * bx2), int(h * by2)))
+
+        for img in ocr_variants(crop):
+            for psm in [6, 11]:
+                txt = pytesseract.image_to_string(img, config=f"--psm {psm}")
+                txt = txt.replace("\n", " ")
+                txt = re.sub(r"\s+", " ", txt)
+
+                if not best_x:
                     m = re.search(r"X\s*:\s*([0-9]+[.,][0-9]+)", txt, flags=re.IGNORECASE)
                     if m:
-                        best["X"] = m.group(1).strip()
+                        best_x = m.group(1).strip()
 
-                if not best["Y"]:
+                if not best_y:
                     m = re.search(r"Y\s*:\s*([0-9]+[.,][0-9]+)", txt, flags=re.IGNORECASE)
                     if m:
-                        best["Y"] = m.group(1).strip()
+                        best_y = m.group(1).strip()
 
-                if best["Sondage"] and best["X"] and best["Y"]:
-                    return best
+                # secours si OCR mange le X: ou Y:
+                if not best_x:
+                    nums = re.findall(r"([0-9]{5,7}[.,][0-9]+)", txt)
+                    if len(nums) >= 1:
+                        best_x = nums[0]
 
-    return best
+                if not best_y:
+                    nums = re.findall(r"([0-9]{5,7}[.,][0-9]+)", txt)
+                    if len(nums) >= 2:
+                        best_y = nums[1]
+
+                if best_x and best_y:
+                    return best_x, best_y
+
+    return best_x, best_y
 
 
 def extract_xy(pdf_bytes: bytes):
@@ -82,15 +117,17 @@ def extract_xy(pdf_bytes: bytes):
 
     for i in range(len(doc)):
         img = render_page(doc, i, zoom=3.0)
-        row = detect_sondage_xy(img)
 
-        if not row["Sondage"] or not row["X"] or not row["Y"]:
+        sondage = detect_sondage(img)
+        x_val, y_val = detect_xy(img)
+
+        if not sondage or not x_val or not y_val:
             undetected.append(i + 1)
 
         rows.append({
-            "Sondage": row["Sondage"] if row["Sondage"] else f"PAGE_{i+1:03d}",
-            "X": row["X"],
-            "Y": row["Y"],
+            "Sondage": sondage if sondage else f"PAGE_{i+1:03d}",
+            "X": x_val,
+            "Y": y_val,
             "Page": i + 1,
         })
 
@@ -138,5 +175,6 @@ if st.button("Lancer l'extraction", type="primary"):
                     file_name="sondages_xy.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
+
         except Exception as e:
             st.exception(e)
