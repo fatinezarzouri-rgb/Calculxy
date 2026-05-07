@@ -4,90 +4,70 @@ from io import BytesIO
 import fitz
 import pandas as pd
 import streamlit as st
-from PIL import Image
-import pytesseract
 
 
 st.set_page_config(page_title="PDF vers Excel", layout="wide")
-st.title("Extraction sondages PDF → Excel")
+st.title("Extraction des sondages PDF vers Excel")
 
 
-def extract_from_text(text, page_num):
-    results = []
-
-    sondages = re.findall(r"Sondage\s*[:\-]?\s*([A-Za-z0-9_]+)", text)
-    coords = re.findall(
-        r"Coordonnées\s*:\s*X\s*[:=]?\s*([\d\s.,]+)\s*Y\s*[:=]?\s*([\d\s.,]+)",
-        text,
-        re.IGNORECASE
-    )
-
-    for i, sondage in enumerate(sondages):
-        x, y = None, None
-
-        if i < len(coords):
-            x = coords[i][0].replace(" ", "").replace(",", ".")
-            y = coords[i][1].replace(" ", "").replace(",", ".")
-
-        results.append({
-            "Page": page_num,
-            "Nom sondage": sondage,
-            "X": x,
-            "Y": y
-        })
-
-    return results
+def clean_number(value):
+    return value.replace(" ", "").replace(",", ".")
 
 
-def ocr_page(page):
-    pix = page.get_pixmap(dpi=180)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+def extract_data(text, page_number):
+    sondage_match = re.search(r"Sondage\s*[:\-]?\s*([A-Za-z0-9_]+)", text)
+    x_match = re.search(r"X\s*[:\-]?\s*([\d\s.,]+)", text)
+    y_match = re.search(r"Y\s*[:\-]?\s*([\d\s.,]+)", text)
 
-    return pytesseract.image_to_string(img, lang="eng")
+    if not sondage_match:
+        return None
+
+    return {
+        "Page": page_number,
+        "Nom sondage": sondage_match.group(1),
+        "X": clean_number(x_match.group(1)) if x_match else "",
+        "Y": clean_number(y_match.group(1)) if y_match else "",
+    }
 
 
-uploaded_file = st.file_uploader("Importer le PDF", type=["pdf"])
+pdf_file = st.file_uploader("Importer un fichier PDF", type=["pdf"])
 
-if uploaded_file:
+if pdf_file:
     try:
-        pdf_bytes = uploaded_file.getvalue()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        results = []
 
-        st.info(f"PDF chargé : {len(doc)} pages")
-
-        all_results = []
         progress = st.progress(0)
 
-        for index, page in enumerate(doc):
-            page_num = index + 1
-
+        for i, page in enumerate(doc):
             text = page.get_text()
+            row = extract_data(text, i + 1)
 
-            if len(text.strip()) < 50:
-                text = ocr_page(page)
+            if row:
+                results.append(row)
 
-            rows = extract_from_text(text, page_num)
-            all_results.extend(rows)
+            progress.progress((i + 1) / len(doc))
 
-            progress.progress(page_num / len(doc))
-
-        if all_results:
-            df = pd.DataFrame(all_results)
+        if results:
+            df = pd.DataFrame(results)
             st.success(f"{len(df)} sondages trouvés")
-            st.dataframe(df)
+            st.dataframe(df, width="stretch")
 
             output = BytesIO()
-            df.to_excel(output, index=False, engine="openpyxl")
+
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Sondages")
+
             output.seek(0)
 
             st.download_button(
-                "Télécharger Excel",
-                output,
+                label="Télécharger Excel",
+                data=output,
                 file_name="sondages.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
-            st.warning("Aucun sondage trouvé.")
+            st.warning("Aucun sondage trouvé dans le PDF.")
 
     except Exception as e:
         st.error("Erreur pendant le traitement du PDF")
