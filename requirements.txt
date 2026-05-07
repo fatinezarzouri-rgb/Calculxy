@@ -1,4 +1,8 @@
 streamlit
 pandas
-pdfplumber
 openpyxl
+pymupdf
+numpy
+pillow
+pytesseract
+opencv-python
