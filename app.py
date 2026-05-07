@@ -1,193 +1,94 @@
 import re
-from io import BytesIO
-from pathlib import Path
-
-import fitz
-import pandas as pd
+import fitz  # PyMuPDF
 import pytesseract
+import pandas as pd
+from PIL import Image
 import streamlit as st
-from PIL import Image, ImageFilter
-
-st.set_page_config(page_title="Extraction X Y des sondages", layout="wide")
+from io import BytesIO
 
 
-def render_page(doc, page_index: int, zoom: float = 4.5):
-    page = doc[page_index]
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+def pdf_to_images(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    images = []
+
+    for page in doc:
+        pix = page.get_pixmap(dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+
+    return images
 
 
-def ocr_variants(crop: Image.Image):
-    gray = crop.convert("L")
-    return [
-        gray,
-        gray.resize((gray.width * 3, gray.height * 3)),
-        gray.point(lambda p: 255 if p > 190 else 0).resize((gray.width * 3, gray.height * 3)),
-        gray.point(lambda p: 255 if p > 165 else 0).resize((gray.width * 3, gray.height * 3)),
-        gray.filter(ImageFilter.SHARPEN).resize((gray.width * 4, gray.height * 4)),
-    ]
+def clean_number(value):
+    value = value.replace(" ", "").replace(",", ".")
+    return float(value)
 
 
-def normalize_num(s: str) -> str:
-    s = s.strip().replace(" ", "")
-    if "." in s and "," not in s:
-        s = s.replace(".", ",")
-    return s
+def extract_data(text):
+    sondage = None
+    x = None
+    y = None
+
+    sondage_match = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-]+)", text)
+    if sondage_match:
+        sondage = sondage_match.group(1)
+
+    x_match = re.search(r"X\s*:\s*([\d\s]+[,\.]\d+)", text)
+    y_match = re.search(r"Y\s*:\s*([\d\s]+[,\.]\d+)", text)
+
+    if x_match:
+        x = clean_number(x_match.group(1))
+
+    if y_match:
+        y = clean_number(y_match.group(1))
+
+    return {
+        "Nom sondage": sondage,
+        "X": x,
+        "Y": y
+    }
 
 
-def clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
+def create_excel(data):
+    df = pd.DataFrame(data)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sondages")
+
+    output.seek(0)
+    return output
 
 
-def detect_sondage(page_img: Image.Image):
-    w, h = page_img.size
+st.title("Extraction PDF vers Excel")
+st.write("Importer un PDF scanné/non sélectionnable pour extraire le nom du sondage, X et Y.")
 
-    crops = [
-        (0.33, 0.67, 0.16, 0.24),
-        (0.31, 0.69, 0.15, 0.25),
-        (0.30, 0.70, 0.15, 0.26),
-    ]
+uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
-    for bx1, bx2, by1, by2 in crops:
-        crop = page_img.crop((int(w * bx1), int(h * by1), int(w * bx2), int(h * by2)))
+if uploaded_pdf:
+    results = []
 
-        for img in ocr_variants(crop):
-            for psm in [6, 11]:
-                txt = pytesseract.image_to_string(img, config=f"--psm {psm}")
-                txt = clean_text(txt.replace("\n", " "))
+    images = pdf_to_images(uploaded_pdf)
 
-                m = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-/]+)", txt, flags=re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
+    for i, image in enumerate(images, start=1):
+        text = pytesseract.image_to_string(image, lang="fra+eng")
+        row = extract_data(text)
+        row["Page"] = i
 
-                m = re.search(r"(SP[_\-]?(?:Rem|Reta)[_\-]?\d+)", txt, flags=re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
+        if row["Nom sondage"] or row["X"] or row["Y"]:
+            results.append(row)
 
-                m = re.search(r"(T\d+\-[A-Za-z0-9\-\+]+)", txt, flags=re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
+    if results:
+        df = pd.DataFrame(results)
+        st.dataframe(df)
 
-    return ""
+        excel_file = create_excel(results)
 
-
-def read_line_value(page_img: Image.Image, boxes, letter: str) -> str:
-    w, h = page_img.size
-    best = ""
-
-    for bx1, bx2, by1, by2 in boxes:
-        crop = page_img.crop((int(w * bx1), int(h * by1), int(w * bx2), int(h * by2)))
-
-        for img in ocr_variants(crop):
-            for psm in [7, 6]:
-                txt = pytesseract.image_to_string(img, config=f"--psm {psm}")
-                txt = clean_text(txt.replace("\n", " "))
-
-                # cas normal : X : 306065,10
-                m = re.search(rf"{letter}\s*:\s*([0-9]{{5,7}}[.,][0-9]+)", txt, flags=re.IGNORECASE)
-                if m:
-                    return normalize_num(m.group(1))
-
-                # secours : X 306065,10
-                m = re.search(rf"{letter}\s*([0-9]{{5,7}}[.,][0-9]+)", txt, flags=re.IGNORECASE)
-                if m:
-                    return normalize_num(m.group(1))
-
-                # secours final : un seul grand nombre dans la ligne
-                nums = re.findall(r"([0-9]{5,7}[.,][0-9]+)", txt)
-                if len(nums) == 1:
-                    best = normalize_num(nums[0])
-
-    return best
-
-
-def detect_xy(page_img: Image.Image):
-    # X et Y lus chacun dans sa propre ligne
-    x_line_boxes = [
-        (0.84, 0.985, 0.165, 0.195),
-        (0.82, 0.985, 0.160, 0.198),
-        (0.80, 0.99, 0.158, 0.200),
-    ]
-
-    y_line_boxes = [
-        (0.84, 0.985, 0.190, 0.220),
-        (0.82, 0.985, 0.185, 0.223),
-        (0.80, 0.99, 0.183, 0.225),
-    ]
-
-    x_val = read_line_value(page_img, x_line_boxes, "X")
-    y_val = read_line_value(page_img, y_line_boxes, "Y")
-
-    return x_val, y_val
-
-
-def extract_xy(pdf_bytes: bytes):
-    tmp = Path("tmp_xy.pdf")
-    tmp.write_bytes(pdf_bytes)
-    doc = fitz.open(str(tmp))
-
-    rows = []
-    undetected = []
-
-    for i in range(len(doc)):
-        img = render_page(doc, i, zoom=4.5)
-
-        sondage = detect_sondage(img)
-        x_val, y_val = detect_xy(img)
-
-        if not sondage or not x_val or not y_val:
-            undetected.append(i + 1)
-
-        rows.append({
-            "Sondage": sondage if sondage else f"PAGE_{i+1:03d}",
-            "X": x_val,
-            "Y": y_val,
-        })
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        df = df.drop_duplicates(subset=["Sondage"], keep="first")
-        df = df[["Sondage", "X", "Y"]]
-
-    return df, undetected
-
-
-def to_excel_bytes(df: pd.DataFrame):
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sondages_XY")
-    bio.seek(0)
-    return bio.getvalue()
-
-
-st.title("Extraction X Y des sondages")
-
-pdf_file = st.file_uploader("", type=["pdf"])
-
-if st.button("Lancer l'extraction", type="primary"):
-    if pdf_file is None:
-        st.error("Charge d'abord le PDF.")
+        st.download_button(
+            label="Télécharger Excel",
+            data=excel_file,
+            file_name="sondages.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     else:
-        try:
-            with st.spinner("Extraction en cours..."):
-                df, undetected = extract_xy(pdf_file.read())
-
-            if undetected:
-                st.warning(f"Pages à vérifier manuellement : {undetected}")
-
-            if df.empty:
-                st.warning("Aucune donnée détectée.")
-            else:
-                st.success(f"Extraction terminée : {len(df)} sondage(s)")
-                st.dataframe(df, use_container_width=True)
-
-                st.download_button(
-                    "Télécharger l'Excel",
-                    data=to_excel_bytes(df),
-                    file_name="sondages_xy.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-
-        except Exception as e:
-            st.exception(e)
+        st.warning("Aucune donnée trouvée.")
