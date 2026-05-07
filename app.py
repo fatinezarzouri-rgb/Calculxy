@@ -1,19 +1,20 @@
 import re
 from io import BytesIO
 
-import fitz
 import pandas as pd
 import streamlit as st
+import pytesseract
+from pdf2image import convert_from_bytes
 
 
 def extract_pl_em_from_pdf(pdf_file):
     rows = []
 
     pdf_bytes = pdf_file.read()
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = convert_from_bytes(pdf_bytes, dpi=300)
 
-    for page_index, page in enumerate(doc, start=1):
-        text = page.get_text("text")
+    for page_num, image in enumerate(images, start=1):
+        text = pytesseract.image_to_string(image, lang="eng")
 
         for line in text.splitlines():
             line = line.strip()
@@ -21,7 +22,7 @@ def extract_pl_em_from_pdf(pdf_file):
             if not line:
                 continue
 
-            if "/" in line:
+            if "date" in line.lower() or "/" in line:
                 continue
 
             nums = re.findall(r"\d+(?:[.,]\d+)?", line)
@@ -29,27 +30,27 @@ def extract_pl_em_from_pdf(pdf_file):
             if len(nums) < 3:
                 continue
 
-            values = [float(x.replace(",", ".")) for x in nums]
+            vals = [float(x.replace(",", ".")) for x in nums]
 
-            for i in range(len(values) - 2):
-                profondeur = values[i]
-                pl = values[i + 1]
-                em = values[i + 2]
+            for i in range(len(vals) - 2):
+                profondeur = vals[i]
+                pl = vals[i + 1]
+                em = vals[i + 2]
 
-                if 0 <= profondeur <= 100 and 0 < pl <= 20 and 0 < em <= 500:
+                if 0 <= profondeur <= 40 and 0.1 <= pl <= 20 and 1 <= em <= 500:
                     rows.append({
-                        "Page": page_index,
+                        "Page": page_num,
                         "Profondeur": profondeur,
                         "pL": pl,
                         "EM": em,
-                        "Ligne": line
+                        "Ligne OCR": line
                     })
                     break
 
     df = pd.DataFrame(rows)
 
     if not df.empty:
-        df = df.drop_duplicates(subset=["Page", "Profondeur", "pL", "EM"])
+        df = df.drop_duplicates()
 
     return df
 
@@ -71,12 +72,12 @@ st.title("📄 Extracteur pL / EM")
 uploaded_pdf = st.file_uploader("Importer un PDF", type=["pdf"])
 
 if uploaded_pdf is not None:
-    st.info("Extraction en cours...")
+    st.info("Extraction OCR en cours...")
 
     df = extract_pl_em_from_pdf(uploaded_pdf)
 
     if df.empty:
-        st.error("Aucune vraie valeur pL / EM trouvée.")
+        st.error("Aucune donnée trouvée.")
     else:
         st.success("Extraction terminée ✔️")
         st.dataframe(df, use_container_width=True)
