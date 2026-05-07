@@ -3,130 +3,179 @@ import pandas as pd
 import pdfplumber
 import re
 from io import BytesIO
+from PIL import Image
+import pytesseract
+import pdf2image
 
-# Configuration de la page
 st.set_page_config(
-    page_title="Extraction Géotechnique - Autoroute Marrakech",
+    page_title="Extraction Géotechnique",
     page_icon="🏗️",
     layout="wide"
 )
 
-# Titre principal
 st.title("🏗️ Application d'Extraction Géotechnique")
-st.markdown("### Extraction des valeurs pL (MPa) et EM (MPa) par sondage et par profondeur")
+st.markdown("### Extraction automatique des valeurs pL et EM depuis PDF (avec OCR)")
 st.markdown("---")
 
-# Fonction d'extraction depuis PDF
-def extract_from_pdf(pdf_file):
-    """Extrait les données Pl et EM par sondage à partir du PDF"""
-    data = []
+def extract_from_pdf_with_ocr(pdf_file):
+    """Extraction avec OCR pour les PDF scannés"""
+    all_data = []
+    current_sondage = None
     
     try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                # Extraire le texte de la page
-                text = page.extract_text()
+        # Convertir le PDF en images
+        images = pdf2image.convert_from_bytes(pdf_file.read(), dpi=200)
+        
+        for page_num, image in enumerate(images, 1):
+            # Appliquer OCR sur l'image
+            text = pytesseract.image_to_string(image, lang='fra+eng')
+            
+            # Chercher le nom du sondage
+            sondage_pattern = r'(SP[-_]?[Rr]eta[-_]?\d{3})'
+            sondage_match = re.search(sondage_pattern, text)
+            if sondage_match:
+                current_sondage = sondage_match.group(1)
+            
+            # Chercher les lignes de données
+            # Pattern pour trouver les valeurs (profondeur, pL, EM)
+            lines = text.split('\n')
+            
+            for line in lines:
+                # Chercher des motifs avec 3 nombres
+                numbers = re.findall(r'\b(\d+\.?\d*)\b', line)
                 
-                # Chercher les références de sondage
-                sondage_pattern = r'(SP[-_]?(?:Reta|Retra|RETA)[-_]?\d{3})'
-                sondage_match = re.findall(sondage_pattern, text, re.IGNORECASE) if text else []
-                
-                # Extraire les tableaux
-                tables = page.extract_tables()
-                
-                for table in tables:
-                    if not table:
+                if len(numbers) >= 3:
+                    try:
+                        profondeur = float(numbers[0])
+                        # Filtrer profondeur plausible
+                        if 0 <= profondeur <= 50:
+                            # Chercher pL (entre 0.5 et 50) et EM (>10)
+                            for i in range(len(numbers) - 1):
+                                val1 = float(numbers[i])
+                                val2 = float(numbers[i + 1])
+                                
+                                if 0.5 <= val1 <= 50 and val2 > 10:
+                                    if current_sondage:
+                                        all_data.append({
+                                            'Sondage': current_sondage,
+                                            'Profondeur (m)': profondeur,
+                                            'pL (MPa)': val1,
+                                            'EM (MPa)': val2
+                                        })
+                                        break
+                                
+                                if val1 > 10 and 0.5 <= val2 <= 50:
+                                    if current_sondage:
+                                        all_data.append({
+                                            'Sondage': current_sondage,
+                                            'Profondeur (m)': profondeur,
+                                            'pL (MPa)': val2,
+                                            'EM (MPa)': val1
+                                        })
+                                        break
+                    except (ValueError, IndexError):
                         continue
-                        
-                    for row in table:
-                        if not row or len(row) < 3:
-                            continue
-                        
-                        # Parcourir les cellules pour trouver des valeurs
-                        for i, cell in enumerate(row):
-                            if cell and isinstance(cell, str):
-                                # Chercher pattern profondeur (ex: 1.5, 3.0, 4.5)
-                                prof_match = re.search(r'\b(\d+\.?\d*)\s*m?\s*$', cell.strip())
-                                if prof_match:
-                                    try:
-                                        profondeur = float(prof_match.group(1))
-                                        if 0 <= profondeur <= 50:
-                                            # Chercher pl et em dans les cellules suivantes
-                                            pl_val = None
-                                            em_val = None
-                                            
-                                            for j in range(i+1, min(i+6, len(row))):
-                                                if j < len(row) and row[j]:
-                                                    val_match = re.search(r'\b(\d+\.?\d*)\b', str(row[j]))
-                                                    if val_match:
-                                                        val = float(val_match.group(1))
-                                                        if 0.5 <= val <= 50 and pl_val is None:
-                                                            pl_val = val
-                                                        elif 10 <= val <= 3000 and em_val is None:
-                                                            em_val = val
-                                                    
-                                                    if pl_val is not None and em_val is not None:
-                                                        break
-                                            
-                                            if pl_val is not None and em_val is not None:
-                                                sondage = sondage_match[0] if sondage_match else f"SP_{page_num:03d}"
-                                                data.append({
-                                                    'Sondage': sondage,
-                                                    'Profondeur (m)': profondeur,
-                                                    'pL (MPa)': pl_val,
-                                                    'EM (MPa)': em_val
-                                                })
-                                    except (ValueError, IndexError):
-                                        continue
+            
+            # Si pas de sondage trouvé, utiliser un nom par défaut
+            if not current_sondage:
+                current_sondage = f"SP_Page{page_num}"
+        
+        # Nettoyer les données
+        if all_data:
+            df = pd.DataFrame(all_data)
+            df = df.drop_duplicates(subset=['Sondage', 'Profondeur (m)'])
+            df = df.sort_values(['Sondage', 'Profondeur (m)'])
+            return df
+        
+        return pd.DataFrame()
+        
     except Exception as e:
-        st.error(f"Erreur lors de la lecture du PDF: {str(e)}")
-    
-    return pd.DataFrame(data)
+        st.error(f"Erreur OCR: {str(e)}")
+        return pd.DataFrame()
 
-# Fonction d'extraction depuis Excel
+def extract_from_pdf_text(pdf_file):
+    """Extraction depuis PDF texte (sans OCR)"""
+    all_data = []
+    current_sondage = None
+    
+    with pdfplumber.open(pdf_file) as pdf:
+        for page_num, page in enumerate(pdf.pages, 1):
+            text = page.extract_text()
+            
+            if text:
+                # Chercher sondage
+                sondage_match = re.search(r'(SP[-_]?[Rr]eta[-_]?\d{3})', text)
+                if sondage_match:
+                    current_sondage = sondage_match.group(1)
+                
+                # Extraire tableaux
+                tables = page.extract_tables()
+                for table in tables:
+                    if table:
+                        for row in table:
+                            if row:
+                                row_text = ' '.join([str(cell) if cell else '' for cell in row])
+                                numbers = re.findall(r'(\d+\.?\d*)', row_text)
+                                
+                                if len(numbers) >= 3:
+                                    try:
+                                        profondeur = float(numbers[0])
+                                        if 0 <= profondeur <= 50:
+                                            for i in range(1, len(numbers)-1):
+                                                val1 = float(numbers[i])
+                                                val2 = float(numbers[i+1])
+                                                
+                                                if 0.5 <= val1 <= 50 and val2 > 10:
+                                                    if current_sondage:
+                                                        all_data.append({
+                                                            'Sondage': current_sondage,
+                                                            'Profondeur (m)': profondeur,
+                                                            'pL (MPa)': val1,
+                                                            'EM (MPa)': val2
+                                                        })
+                                                        break
+                                    except:
+                                        pass
+    
+    if all_data:
+        df = pd.DataFrame(all_data)
+        df = df.drop_duplicates()
+        return df
+    return pd.DataFrame()
+
 def extract_from_excel(excel_file):
-    """Extrait les données à partir du fichier Excel"""
+    """Extraction depuis Excel"""
     try:
         df = pd.read_excel(excel_file)
-        
-        # Nettoyer les colonnes
         df.columns = df.columns.str.strip()
         
-        # Chercher les colonnes nécessaires
-        sondage_col = None
-        profondeur_col = None
-        pl_col = None
-        em_col = None
-        
+        # Détection auto des colonnes
+        mapping = {}
         for col in df.columns:
             col_lower = col.lower()
             if 'sondage' in col_lower or 'forage' in col_lower:
-                sondage_col = col
-            elif 'profondeur' in col_lower or 'depth' in col_lower:
-                profondeur_col = col
+                mapping['Sondage'] = col
+            elif 'profondeur' in col_lower or 'depth' in col_lower or 'prof' in col_lower:
+                mapping['Profondeur (m)'] = col
             elif 'pl' in col_lower or 'pL' in col:
-                pl_col = col
+                mapping['pL (MPa)'] = col
             elif 'em' in col_lower or 'EM' in col:
-                em_col = col
+                mapping['EM (MPa)'] = col
         
-        if all([sondage_col, profondeur_col, pl_col, em_col]):
-            result_df = pd.DataFrame({
-                'Sondage': df[sondage_col],
-                'Profondeur (m)': pd.to_numeric(df[profondeur_col], errors='coerce'),
-                'pL (MPa)': pd.to_numeric(df[pl_col], errors='coerce'),
-                'EM (MPa)': pd.to_numeric(df[em_col], errors='coerce')
-            })
-            result_df = result_df.dropna()
-            return result_df
-        else:
-            st.warning(f"Colonnes non trouvées. Colonnes disponibles: {list(df.columns)}")
-            return pd.DataFrame()
-            
+        if len(mapping) == 4:
+            result = pd.DataFrame({
+                'Sondage': df[mapping['Sondage']],
+                'Profondeur (m)': pd.to_numeric(df[mapping['Profondeur (m)']], errors='coerce'),
+                'pL (MPa)': pd.to_numeric(df[mapping['pL (MPa)']], errors='coerce'),
+                'EM (MPa)': pd.to_numeric(df[mapping['EM (MPa)']], errors='coerce')
+            }).dropna()
+            return result
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Erreur lors de la lecture de l'Excel: {str(e)}")
+        st.error(f"Erreur Excel: {str(e)}")
         return pd.DataFrame()
 
-# Sidebar pour l'import
+# Sidebar
 with st.sidebar:
     st.header("📁 Import des fichiers")
     
@@ -137,131 +186,120 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.markdown("### 📋 Format attendu")
+    
+    # Option OCR
+    use_ocr = st.checkbox("🔍 Activer l'OCR (pour PDF scannés)", value=True)
+    
+    st.markdown("---")
+    st.markdown("### 📋 Instructions")
     st.info("""
-    **Excel:** Fichier avec colonnes:
-    - Sondage / forage
-    - Profondeur (m)
-    - pL (MPa)
-    - EM (MPa)
+    **Pour PDF scannés:**
+    - Activez l'OCR
+    - L'application reconnaît automatiquement le texte
+    
+    **Pour Excel:**
+    - Colonnes automatiquement détectées
     """)
 
-# Stockage des données
+# Stockage
 if 'extracted_data' not in st.session_state:
     st.session_state.extracted_data = {}
 
-# Traitement des fichiers
+# Traitement
 if uploaded_files:
     for file in uploaded_files:
         file_key = file.name
         
         if file_key not in st.session_state.extracted_data:
-            with st.spinner(f"📊 Extraction de {file.name}..."):
+            with st.spinner(f"📊 Analyse de {file.name}..."):
                 try:
                     if file.name.lower().endswith('.pdf'):
-                        df = extract_from_pdf(file)
+                        if use_ocr:
+                            # Réinitialiser le pointeur du fichier
+                            file.seek(0)
+                            df = extract_from_pdf_with_ocr(file)
+                        else:
+                            file.seek(0)
+                            df = extract_from_pdf_text(file)
                     else:
                         df = extract_from_excel(file)
                     
                     if not df.empty:
                         st.session_state.extracted_data[file_key] = df
                         st.success(f"✅ {file.name}: {len(df)} lignes extraites")
+                        
+                        # Aperçu
+                        with st.expander(f"Aperçu de {file.name}"):
+                            st.dataframe(df.head())
                     else:
                         st.warning(f"⚠️ {file.name}: Aucune donnée trouvée")
+                        
+                        if use_ocr:
+                            st.info("💡 Essayez de désactiver l'OCR ou vérifiez le format du PDF")
+                        
                 except Exception as e:
-                    st.error(f"❌ Erreur avec {file.name}: {str(e)}")
+                    st.error(f"❌ Erreur: {str(e)}")
 
-# Affichage des données
+# Affichage des résultats
 if st.session_state.extracted_data:
-    st.markdown("## 📊 Données extraites")
+    st.markdown("## 📊 Résultats de l'extraction")
     
-    # Sélection du fichier
-    selected_file = st.selectbox(
-        "📁 Sélectionner un fichier",
+    # Sélection
+    selected = st.selectbox(
+        "Sélectionner un fichier",
         list(st.session_state.extracted_data.keys())
     )
     
-    if selected_file:
-        df_selected = st.session_state.extracted_data[selected_file]
+    if selected:
+        df = st.session_state.extracted_data[selected]
         
-        if not df_selected.empty:
-            sondages = sorted(df_selected['Sondage'].unique())
+        # Tableau principal
+        st.subheader("📋 Données extraites")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # Par sondage
+        sondages = df['Sondage'].unique()
+        
+        if len(sondages) > 0:
+            st.subheader("📈 Visualisation par sondage")
             
-            # Filtre par sondage
-            selected_sondage = st.selectbox(
-                "Filtrer par sondage",
-                ["Tous"] + list(sondages)
-            )
-            
-            if selected_sondage != "Tous":
-                display_df = df_selected[df_selected['Sondage'] == selected_sondage]
-            else:
-                display_df = df_selected
-            
-            # Afficher le tableau
-            st.dataframe(
-                display_df.sort_values(['Sondage', 'Profondeur (m)']),
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Statistiques
-            st.markdown("### 📊 Statistiques")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Nombre total de mesures", len(df_selected))
-            
-            with col2:
-                st.metric("Nombre de sondages", len(sondages))
-            
-            with col3:
-                st.metric("Profondeur max", f"{df_selected['Profondeur (m)'].max():.1f} m")
-            
-            # Graphiques
-            st.markdown("### 📈 Évolution avec la profondeur")
-            
-            for sondage in sondages[:5]:  # Limiter à 5 sondages pour la lisibilité
-                with st.expander(f"Sondage {sondage}"):
-                    sondage_df = df_selected[df_selected['Sondage'] == sondage].sort_values('Profondeur (m)')
+            for sondage in sondages:
+                with st.expander(f"Sondage: {sondage}"):
+                    sondage_df = df[df['Sondage'] == sondage].sort_values('Profondeur (m)')
                     
-                    col1, col2 = st.columns(2)
-                    
+                    col1, col2 = st.columns([2, 1])
                     with col1:
-                        st.write("**pL (MPa)**")
-                        st.line_chart(sondage_df.set_index('Profondeur (m)')['pL (MPa)'])
-                    
+                        st.dataframe(sondage_df, hide_index=True, use_container_width=True)
                     with col2:
-                        st.write("**EM (MPa)**")
-                        st.line_chart(sondage_df.set_index('Profondeur (m)')['EM (MPa)'])
-    
-    # Export
-    st.markdown("---")
-    st.markdown("## 💾 Export des données")
-    
-    # Combiner toutes les données
-    all_data = pd.concat(st.session_state.extracted_data.values(), ignore_index=True)
-    
-    csv = all_data.to_csv(index=False)
-    st.download_button(
-        label="📥 Télécharger CSV",
-        data=csv,
-        file_name="donnees_geotechniques.csv",
-        mime="text/csv"
-    )
+                        st.metric("Mesures", len(sondage_df))
+                        st.metric("Profondeur max", f"{sondage_df['Profondeur (m)'].max():.1f}m")
+                    
+                    # Graphique
+                    st.line_chart(sondage_df.set_index('Profondeur (m)')[['pL (MPa)', 'EM (MPa)']])
+        
+        # Export
+        st.markdown("---")
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Télécharger CSV",
+            data=csv,
+            file_name="extraction_geotech.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 else:
-    st.info("👈 **Commencez par importer des fichiers PDF ou Excel dans la barre latérale**")
+    st.info("👈 **Importez un fichier PDF (même scanné) ou Excel**")
     
-    with st.expander("📖 Exemple de format attendu"):
-        example_data = {
-            'Sondage': ['SP_Reta_043', 'SP_Reta_043', 'SP_Reta_043', 'SP_Reta_044', 'SP_Reta_044'],
-            'Profondeur (m)': [1.5, 3.0, 4.5, 1.5, 3.0],
-            'pL (MPa)': [1.17, 1.36, 2.56, 1.85, 3.46],
-            'EM (MPa)': [25.1, 30.6, 65.1, 29.5, 65.3]
-        }
-        st.dataframe(pd.DataFrame(example_data), use_container_width=True)
-
-st.markdown("---")
-st.markdown("### ℹ️ À propos")
-st.markdown("Application pour l'extraction des données géotechniques")
+    with st.expander("ℹ️ Comment ça marche"):
+        st.markdown("""
+        **Avec OCR activé:**
+        - Convertit chaque page du PDF en image
+        - Reconnaît le texte automatiquement
+        - Extrait les valeurs de profondeur, pL et EM
+        
+        **Formats reconnus:**
+        - PDF texte: extraction directe plus rapide
+        - PDF scanné: nécessite l'OCR (plus lent)
+        - Excel: lecture directe
+        """)
