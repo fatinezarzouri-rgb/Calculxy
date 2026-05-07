@@ -1,85 +1,33 @@
 import re
-import shutil
 from io import BytesIO
 from pathlib import Path
 
 import fitz
 import pandas as pd
+import pytesseract
 import streamlit as st
 from PIL import Image, ImageFilter
 
 st.set_page_config(page_title="Extraction X Y des sondages", layout="wide")
 
 
-# =========================================================
-# OCR DISPONIBLE OU PAS
-# =========================================================
-OCR_AVAILABLE = shutil.which("tesseract") is not None
-
-if OCR_AVAILABLE:
-    import pytesseract
-
-
-# =========================================================
-# RENDER PAGE
-# =========================================================
 def render_page(doc, page_index: int, zoom: float = 3.0):
     page = doc[page_index]
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
 
-# =========================================================
-# EXTRACTION TEXTE DIRECTE
-# =========================================================
-def extract_xy_from_text(page):
-    text = page.get_text("text")
-
-    sondage = ""
-    x_val = ""
-    y_val = ""
-
-    m = re.search(r"Sondage\s*:\s*([A-Za-z0-9_\-/]+)", text, flags=re.IGNORECASE)
-    if m:
-        sondage = m.group(1).strip()
-
-    if not sondage:
-        m = re.search(r"(SP[_\-]?(?:Rem|Reta)[_\-]?\d+)", text, flags=re.IGNORECASE)
-        if m:
-            sondage = m.group(1).strip()
-
-    m = re.search(r"X\s*:\s*([0-9]+[.,][0-9]+)", text, flags=re.IGNORECASE)
-    if m:
-        x_val = m.group(1).strip()
-
-    m = re.search(r"Y\s*:\s*([0-9]+[.,][0-9]+)", text, flags=re.IGNORECASE)
-    if m:
-        y_val = m.group(1).strip()
-
-    return {
-        "Sondage": sondage,
-        "X": x_val,
-        "Y": y_val,
-        "mode": "texte"
-    }
-
-
-# =========================================================
-# EXTRACTION OCR
-# =========================================================
-def extract_xy_by_ocr(page_img: Image.Image):
-    if not OCR_AVAILABLE:
-        return {"Sondage": "", "X": "", "Y": "", "mode": "ocr_indisponible"}
-
+def detect_sondage_xy(page_img: Image.Image):
     w, h = page_img.size
 
+    # Zone haute droite où se trouvent Sondage / X / Y sur les fiches Labotest
     crops = [
-        (0.33, 0.96, 0.14, 0.26),
         (0.30, 0.96, 0.12, 0.28),
-        (0.36, 0.98, 0.13, 0.27),
+        (0.28, 0.96, 0.12, 0.30),
+        (0.33, 0.98, 0.13, 0.27),
     ]
 
-    best = {"Sondage": "", "X": "", "Y": "", "mode": "ocr"}
+    best = {"Sondage": "", "X": "", "Y": ""}
 
     for bx1, bx2, by1, by2 in crops:
         crop = page_img.crop((int(w * bx1), int(h * by1), int(w * bx2), int(h * by2)))
@@ -124,39 +72,17 @@ def extract_xy_by_ocr(page_img: Image.Image):
     return best
 
 
-# =========================================================
-# HYBRIDE
-# =========================================================
-def extract_xy_hybrid(pdf_bytes: bytes):
+def extract_xy(pdf_bytes: bytes):
     tmp = Path("tmp_xy.pdf")
     tmp.write_bytes(pdf_bytes)
     doc = fitz.open(str(tmp))
 
     rows = []
     undetected = []
-    scan_without_ocr = []
 
     for i in range(len(doc)):
-        page = doc[i]
-
-        # 1) tentative texte direct
-        row = extract_xy_from_text(page)
-
-        # 2) si incomplet -> OCR
-        if not row["Sondage"] or not row["X"] or not row["Y"]:
-            page_img = render_page(doc, i, zoom=3.0)
-            row_ocr = extract_xy_by_ocr(page_img)
-
-            if row_ocr["mode"] == "ocr_indisponible":
-                scan_without_ocr.append(i + 1)
-            else:
-                if row_ocr["Sondage"]:
-                    row["Sondage"] = row_ocr["Sondage"]
-                if row_ocr["X"]:
-                    row["X"] = row_ocr["X"]
-                if row_ocr["Y"]:
-                    row["Y"] = row_ocr["Y"]
-                row["mode"] = row_ocr["mode"]
+        img = render_page(doc, i, zoom=3.0)
+        row = detect_sondage_xy(img)
 
         if not row["Sondage"] or not row["X"] or not row["Y"]:
             undetected.append(i + 1)
@@ -166,16 +92,15 @@ def extract_xy_hybrid(pdf_bytes: bytes):
             "X": row["X"],
             "Y": row["Y"],
             "Page": i + 1,
-            "Mode": row["mode"],
         })
 
     df = pd.DataFrame(rows)
 
     if not df.empty:
         df = df.sort_values("Page").drop_duplicates(subset=["Sondage"], keep="first")
-        df = df[["Sondage", "X", "Y", "Page", "Mode"]]
+        df = df[["Sondage", "X", "Y", "Page"]]
 
-    return df, undetected, scan_without_ocr
+    return df, undetected
 
 
 def to_excel_bytes(df: pd.DataFrame):
@@ -186,9 +111,6 @@ def to_excel_bytes(df: pd.DataFrame):
     return bio.getvalue()
 
 
-# =========================================================
-# UI
-# =========================================================
 st.title("Extraction X Y des sondages")
 
 pdf_file = st.file_uploader("", type=["pdf"])
@@ -199,12 +121,7 @@ if st.button("Lancer l'extraction", type="primary"):
     else:
         try:
             with st.spinner("Extraction en cours..."):
-                df, undetected, scan_without_ocr = extract_xy_hybrid(pdf_file.read())
-
-            if scan_without_ocr:
-                st.warning(
-                    f"PDF scanné détecté sur certaines pages, mais OCR non disponible sur ce serveur : {scan_without_ocr}"
-                )
+                df, undetected = extract_xy(pdf_file.read())
 
             if undetected:
                 st.warning(f"Pages à vérifier manuellement : {undetected}")
@@ -221,6 +138,5 @@ if st.button("Lancer l'extraction", type="primary"):
                     file_name="sondages_xy.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
         except Exception as e:
             st.exception(e)
