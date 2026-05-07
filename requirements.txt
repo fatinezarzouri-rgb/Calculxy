@@ -5,4 +5,4 @@ PyMuPDF
 Pillow
 opencv-python-headless
 numpy<2
-easyocr
+easyocr==1.7.2
