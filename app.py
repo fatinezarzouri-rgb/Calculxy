@@ -8,79 +8,47 @@ import streamlit as st
 from PIL import Image
 
 
-st.set_page_config(page_title="PDF vers Excel", layout="wide")
-
-st.title("Extraction PDF vers Excel")
-st.write("Importer un PDF scanné/non sélectionnable pour extraire le nom du sondage, X et Y.")
+st.set_page_config(page_title="PDF OCR vers Excel", layout="wide")
+st.title("Extraction OCR PDF vers Excel")
 
 
 def clean_number(value):
     if not value:
         return None
-
-    value = value.replace(" ", "")
-    value = value.replace(",", ".")
-
+    value = value.replace(" ", "").replace(",", ".")
     try:
         return float(value)
     except ValueError:
         return None
 
 
-def pdf_to_images(pdf_file):
-    doc = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
-    images = []
-
-    for page in doc:
-        pix = page.get_pixmap(dpi=200)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        images.append(img)
-
-    return images
-
-
 def extract_data(text):
-    sondage = None
-    x = None
-    y = None
-
-    sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
-        text,
-        re.IGNORECASE
-    )
-
-    if sondage_match:
-        sondage = sondage_match.group(1)
-
-    x_match = re.search(
-        r"X\s*[:\-]?\s*([\d\s]+[,\.]\d+)",
-        text,
-        re.IGNORECASE
-    )
-
-    y_match = re.search(
-        r"Y\s*[:\-]?\s*([\d\s]+[,\.]\d+)",
-        text,
-        re.IGNORECASE
-    )
-
-    if x_match:
-        x = clean_number(x_match.group(1))
-
-    if y_match:
-        y = clean_number(y_match.group(1))
+    sondage_match = re.search(r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)", text, re.I)
+    x_match = re.search(r"X\s*[:\-]?\s*([\d\s]+[,\.]\d+)", text, re.I)
+    y_match = re.search(r"Y\s*[:\-]?\s*([\d\s]+[,\.]\d+)", text, re.I)
 
     return {
-        "Nom sondage": sondage,
-        "X": x,
-        "Y": y
+        "Nom sondage": sondage_match.group(1) if sondage_match else None,
+        "X": clean_number(x_match.group(1)) if x_match else None,
+        "Y": clean_number(y_match.group(1)) if y_match else None,
     }
+
+
+def ocr_page(page):
+    pix = page.get_pixmap(dpi=180)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+    text = pytesseract.image_to_string(
+        img,
+        lang="eng",
+        config="--psm 6"
+    )
+
+    return text
 
 
 def create_excel(data):
     df = pd.DataFrame(data)
-
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -94,35 +62,32 @@ uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
 if uploaded_pdf:
     try:
+        doc = fitz.open(stream=uploaded_pdf.getvalue(), filetype="pdf")
         results = []
 
-        with st.spinner("Traitement du PDF en cours..."):
-            images = pdf_to_images(uploaded_pdf)
+        st.info(f"PDF chargé : {len(doc)} pages")
+        progress = st.progress(0)
 
-            progress = st.progress(0)
+        for i, page in enumerate(doc):
+            text = ocr_page(page)
+            row = extract_data(text)
+            row["Page"] = i + 1
 
-            for i, image in enumerate(images, start=1):
-                text = pytesseract.image_to_string(image, lang="eng")
+            if row["Nom sondage"] or row["X"] or row["Y"]:
+                results.append(row)
 
-                row = extract_data(text)
-                row["Page"] = i
-
-                if row["Nom sondage"] or row["X"] or row["Y"]:
-                    results.append(row)
-
-                progress.progress(i / len(images))
+            progress.progress((i + 1) / len(doc))
 
         if results:
             df = pd.DataFrame(results)
-
-            st.success(f"{len(df)} résultat(s) trouvé(s)")
+            st.success(f"{len(df)} lignes trouvées")
             st.dataframe(df, width="stretch")
 
             excel_file = create_excel(results)
 
             st.download_button(
-                label="Télécharger Excel",
-                data=excel_file,
+                "Télécharger Excel",
+                excel_file,
                 file_name="sondages.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
@@ -130,5 +95,5 @@ if uploaded_pdf:
             st.warning("Aucune donnée trouvée.")
 
     except Exception as e:
-        st.error("Erreur pendant le traitement du PDF")
+        st.error("Erreur pendant le traitement")
         st.code(str(e))
