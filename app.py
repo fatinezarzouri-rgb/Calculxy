@@ -30,7 +30,9 @@ def extract_data(text, file_name=""):
 
     nom = None
 
-    # ===== LPEE =====
+    # =========================
+    # LPEE
+    # =========================
     match_lpee = re.search(
         r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
         text,
@@ -40,7 +42,7 @@ def extract_data(text, file_name=""):
     if match_lpee:
         nom = match_lpee.group(1)
 
-    # ===== sinon depuis nom fichier =====
+    # si OCR rate => depuis nom fichier
     if not nom and file_name:
         match_file = re.search(
             r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
@@ -51,30 +53,35 @@ def extract_data(text, file_name=""):
         if match_file:
             nom = match_file.group(1)
 
-    # ===== LABOTEST CLASSIQUE =====
+    # =========================
+    # LABOTEST
+    # =========================
     if not nom:
-        match_labotest = re.search(
-            r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+
+        sondage_match = re.search(
+            r"Sondage\s*[:\-]?\s*(.+?)(?=\s+Machine|\s+X\s*[:\-]|\s+Y\s*[:\-]|$)",
             text,
             re.I
         )
 
-        if match_labotest:
-            nom = match_labotest.group(1)
+        if sondage_match:
+            nom = sondage_match.group(1)
+            nom = nom.strip()
+            nom = nom.replace(" ", "")
+            nom = nom.replace("-", "_")
 
-    # nettoyage
-    if nom:
-        nom = nom.strip()
-        nom = re.sub(r"\s+", "-", nom)
-        nom = nom.replace("_", "-")
-        nom = nom.upper()
-
+    # =========================
+    # X
+    # =========================
     x_match = re.search(
         r"\bX\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
         text,
         re.I
     )
 
+    # =========================
+    # Y
+    # =========================
     y_match = re.search(
         r"\bY\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
         text,
