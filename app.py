@@ -28,19 +28,19 @@ def extract_data(text):
     text = re.sub(r"\s+", " ", text)
 
     sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*(.+?)(?=\s+Machine|\s+X\s*[:\-]|\s+Y\s*[:\-]|$)",
+        r"Sondage(?:\s+pressiométrique\s+Ménard)?\s*[:\-]?\s*(.+?)(?=\s+Type|\s+Machine|\s+X\s*[:\-]|\s+Y\s*[:\-]|$)",
         text,
         re.I
     )
 
     x_match = re.search(
-        r"\bX\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
+        r"\bX\s*[:\-]?\s*([0-9\s]+(?:[,.]\d{1,2})?)",
         text,
         re.I
     )
 
     y_match = re.search(
-        r"\bY\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
+        r"\bY\s*[:\-]?\s*([0-9\s]+(?:[,.]\d{1,2})?)",
         text,
         re.I
     )
@@ -48,18 +48,16 @@ def extract_data(text):
     nom = None
 
     if sondage_match:
-        nom = sondage_match.group(1)
-        nom = nom.strip()
+        nom = sondage_match.group(1).strip()
         nom = nom.replace(" ", "")
-        nom = nom.replace("-", "_")
+        nom = nom.replace(":", "")
+        nom = nom.replace(";", "")
 
     return {
         "Nom sondage": nom,
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
-
-
 def fix_missing_name(results):
     if not results:
         return None
