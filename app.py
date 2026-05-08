@@ -30,39 +30,41 @@ def extract_data(text, file_name=""):
 
     nom = None
 
-    # LABOTEST
-    match_labotest = re.search(
-        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+    # ===== LPEE =====
+    match_lpee = re.search(
+        r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
         text,
         re.I
     )
 
-    if match_labotest:
-        nom = match_labotest.group(1).strip()
+    if match_lpee:
+        nom = match_lpee.group(1)
 
-    # LPEE : SP / SC / SCP
-    if not nom:
-        match_lpee = re.search(
-            r"(T2[\s\-]*(?:SCP|SP|SC)[\s\-]*EXE[\s\-]*\d+(?:\+PZ)?)",
-            text,
-            re.I
-        )
-
-        if match_lpee:
-            nom = match_lpee.group(1).strip()
-
-    # LPEE depuis nom fichier
+    # ===== sinon depuis nom fichier =====
     if not nom and file_name:
         match_file = re.search(
-            r"(T2[\s\-]*(?:SCP|SP|SC)[\s\-]*EXE[\s\-]*\d+(?:\+PZ)?)",
+            r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
             file_name,
             re.I
         )
 
         if match_file:
-            nom = match_file.group(1).strip()
+            nom = match_file.group(1)
 
+    # ===== LABOTEST CLASSIQUE =====
+    if not nom:
+        match_labotest = re.search(
+            r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+            text,
+            re.I
+        )
+
+        if match_labotest:
+            nom = match_labotest.group(1)
+
+    # nettoyage
     if nom:
+        nom = nom.strip()
         nom = re.sub(r"\s+", "-", nom)
         nom = nom.replace("_", "-")
         nom = nom.upper()
@@ -84,7 +86,6 @@ def extract_data(text, file_name=""):
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
-
 
 def ocr_page(page, dpi=220, psm=6):
     pix = page.get_pixmap(dpi=dpi)
