@@ -27,33 +27,35 @@ def extract_data(text):
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
 
-    # NOM SONDAGE
     sondage_match = re.search(
-    r"Sondage\s*[:\-]?\s*([^\s]+)",
-    text,
-    re.I
-)
+        r"Sondage\s*[:\-]?\s*(.+?)(?=\s+X\s*[:\-])",
+        text,
+        re.I
+    )
 
-    # X avec exactement 2 chiffres après virgule/point
     x_match = re.search(
         r"\bX\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
 
-    # Y avec exactement 2 chiffres après virgule/point
     y_match = re.search(
         r"\bY\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
 
+    nom = None
+    if sondage_match:
+        nom = sondage_match.group(1)
+        nom = nom.replace(" ", "")
+        nom = nom.replace("-", "_")
+
     return {
-        "Nom sondage": sondage_match.group(1).strip() if sondage_match else None,
+        "Nom sondage": nom,
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
-
 
 def fix_missing_name(results):
     if not results:
