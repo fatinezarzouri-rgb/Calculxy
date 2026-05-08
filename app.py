@@ -7,7 +7,6 @@ import pytesseract
 import streamlit as st
 from PIL import Image
 
-
 st.set_page_config(page_title="PDF OCR vers Excel", layout="wide")
 st.title("Extraction OCR PDF vers Excel")
 
@@ -28,20 +27,23 @@ def extract_data(text):
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
 
+    # NOM SONDAGE
     sondage_match = re.search(
-        r"Sondage\s*[:\-]\s*(.+?)(?=\s+X\s*[:\-])",
+        r"Sondage\s*[:\-]?\s*([^\s]+)",
         text,
         re.I
     )
 
+    # X avec exactement 2 chiffres après virgule/point
     x_match = re.search(
-        r"\bX\s*[:\-]\s*([0-9\s.,]+)",
+        r"\bX\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
 
+    # Y avec exactement 2 chiffres après virgule/point
     y_match = re.search(
-        r"\bY\s*[:\-]\s*([0-9\s.,]+)",
+        r"\bY\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
