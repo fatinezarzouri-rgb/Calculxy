@@ -30,9 +30,7 @@ def extract_data(text, file_name=""):
 
     nom = None
 
-    # =========================
-    # LPEE
-    # =========================
+    # LPEE فقط
     match_lpee = re.search(
         r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
         text,
@@ -42,22 +40,17 @@ def extract_data(text, file_name=""):
     if match_lpee:
         nom = match_lpee.group(1)
 
-    # si OCR rate => depuis nom fichier
     if not nom and file_name:
         match_file = re.search(
             r"(T2[\s\-_]*(?:SCP|SP|SC)[\s\-_]*EXE[\s\-_]*\d+(?:\+PZ)?)",
             file_name,
             re.I
         )
-
         if match_file:
             nom = match_file.group(1)
 
-    # =========================
-    # LABOTEST
-    # =========================
+    # LABOTEST كما كان
     if not nom:
-
         sondage_match = re.search(
             r"Sondage\s*[:\-]?\s*(.+?)(?=\s+Machine|\s+X\s*[:\-]|\s+Y\s*[:\-]|$)",
             text,
@@ -65,28 +58,37 @@ def extract_data(text, file_name=""):
         )
 
         if sondage_match:
-            nom = sondage_match.group(1)
-            nom = nom.strip()
+            nom = sondage_match.group(1).strip()
             nom = nom.replace(" ", "")
             nom = nom.replace("-", "_")
 
-    # =========================
-    # X
-    # =========================
+    # X/Y كما كانو فـ Labotest
     x_match = re.search(
-        r"\bX\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
+        r"\bX\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
 
-    # =========================
-    # Y
-    # =========================
     y_match = re.search(
-        r"\bY\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
+        r"\bY\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
         text,
         re.I
     )
+
+    # إذا LPEE ومافيهش فاصلة
+    if not x_match:
+        x_match = re.search(
+            r"\bX\s*[:\-]?\s*([0-9]{6})",
+            text,
+            re.I
+        )
+
+    if not y_match:
+        y_match = re.search(
+            r"\bY\s*[:\-]?\s*([0-9]{6})",
+            text,
+            re.I
+        )
 
     return {
         "Nom sondage": nom,
