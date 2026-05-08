@@ -28,10 +28,26 @@ def extract_data(text):
     text = re.sub(r"\s+", " ", text)
 
     sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*(.+?)(?=\s+X\s*[:\-])",
-        text,
-        re.I
-    )
+    r"Sondage\s*:\s*([^\n\r]+)",
+    text,
+    re.I
+)
+
+nom = None
+
+if sondage_match:
+    nom = sondage_match.group(1)
+
+    # arrêter au premier mot technique après le nom
+    nom = re.split(
+        r"\s{2,}|Machine|X\s*:|Y\s*:",
+        nom,
+        flags=re.I
+    )[0]
+
+    nom = nom.strip()
+    nom = nom.replace(" ", "")
+    nom = nom.replace("-", "_")
 
     x_match = re.search(
         r"\bX\s*[:\-]?\s*([\d\s]+[,.]\d{2})",
@@ -56,6 +72,9 @@ def extract_data(text):
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
+
+
+
 
 def fix_missing_name(results):
     if not results:
