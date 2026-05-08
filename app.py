@@ -25,39 +25,26 @@ def clean_number(value):
 
 
 def extract_data(text):
-    text_clean = text.replace("\n", " ")
-
-    sondage_patterns = [
-        r"Sondage\s*[:\-]?\s*([A-Z]{2}_[A-Za-z]+_\d{3})",
-        r"Sondage\s*[:\-]?\s*([A-Z]{2}[_\-][A-Za-z0-9]+[_\-]\d+)",
-        r"(SP[_\-][A-Za-z0-9]+[_\-]\d{3})",
-        r"(SP\s*[_\-]\s*[A-Za-z0-9]+\s*[_\-]\s*\d{3})",
-    ]
-
-    sondage = None
-
-    for pattern in sondage_patterns:
-        match = re.search(pattern, text_clean, re.I)
-        if match:
-            sondage = match.group(1)
-            sondage = sondage.replace(" ", "")
-            sondage = sondage.replace("-", "_")
-            break
+    sondage_match = re.search(
+        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
+        text,
+        re.I
+    )
 
     x_match = re.search(
         r"X\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
-        text_clean,
+        text,
         re.I
     )
 
     y_match = re.search(
         r"Y\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
-        text_clean,
+        text,
         re.I
     )
 
     return {
-        "Nom sondage": sondage,
+        "Nom sondage": sondage_match.group(1) if sondage_match else None,
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
@@ -192,6 +179,9 @@ if uploaded_pdf:
                 text = ocr_page(page)
                 row = extract_data(text)
                 row["Page"] = page_number
+
+                if not row["Nom sondage"]:
+                    row["Nom sondage"] = fix_missing_name(results)
 
                 if row["Nom sondage"] or row["X"] or row["Y"]:
                     results.append(row)
