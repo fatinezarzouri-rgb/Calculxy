@@ -7,6 +7,7 @@ import pytesseract
 import streamlit as st
 from PIL import Image
 
+
 st.set_page_config(page_title="PDF OCR vers Excel", layout="wide")
 st.title("Extraction OCR PDF vers Excel")
 
@@ -23,40 +24,57 @@ def clean_number(value):
         return None
 
 
-def extract_data(text):
+def extract_data(text, file_name=""):
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
 
     nom = None
 
-    # ===== FORMAT LPEE =====
-    match_lpee = re.search(
-        r"Sondage\s*[:\-]\s*([A-Za-z0-9_\-]+)",
+    # LABOTEST
+    match_labotest = re.search(
+        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
         text,
         re.I
     )
 
-    # ===== FORMAT LABO / TEST =====
-    match_labo = re.search(
-        r"Sondage\s+pressiométrique\s+Ménard\s*[:\-]\s*([A-Za-z0-9_\-]+)",
-        text,
-        re.I
-    )
+    if match_labotest:
+        nom = match_labotest.group(1).strip()
 
-    if match_labo:
-        nom = match_labo.group(1).strip()
+    # LPEE : SP / SC / SCP
+    if not nom:
+        match_lpee = re.search(
+            r"(T2[\s\-]*(?:SCP|SP|SC)[\s\-]*EXE[\s\-]*\d+(?:\+PZ)?)",
+            text,
+            re.I
+        )
 
-    elif match_lpee:
-        nom = match_lpee.group(1).strip()
+        if match_lpee:
+            nom = match_lpee.group(1).strip()
+
+    # LPEE depuis nom fichier
+    if not nom and file_name:
+        match_file = re.search(
+            r"(T2[\s\-]*(?:SCP|SP|SC)[\s\-]*EXE[\s\-]*\d+(?:\+PZ)?)",
+            file_name,
+            re.I
+        )
+
+        if match_file:
+            nom = match_file.group(1).strip()
+
+    if nom:
+        nom = re.sub(r"\s+", "-", nom)
+        nom = nom.replace("_", "-")
+        nom = nom.upper()
 
     x_match = re.search(
-        r"\bX\s*[:\-]?\s*([0-9\s]+(?:[,.]\d{1,2})?)",
+        r"\bX\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
         text,
         re.I
     )
 
     y_match = re.search(
-        r"\bY\s*[:\-]?\s*([0-9\s]+(?:[,.]\d{1,2})?)",
+        r"\bY\s*[:\-]?\s*([0-9]{6}(?:[,.]\d{1,2})?)",
         text,
         re.I
     )
@@ -66,24 +84,6 @@ def extract_data(text):
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
-def fix_missing_name(results):
-    if not results:
-        return None
-
-    last_name = results[-1].get("Nom sondage")
-
-    if not last_name:
-        return None
-
-    match = re.search(r"(.+_)(\d+)$", last_name)
-
-    if not match:
-        return None
-
-    prefix = match.group(1)
-    number = int(match.group(2)) + 1
-
-    return f"{prefix}{number:03d}"
 
 
 def ocr_page(page, dpi=220, psm=6):
@@ -99,7 +99,7 @@ def ocr_page(page, dpi=220, psm=6):
     return text
 
 
-def redetect_page(page):
+def redetect_page(page, file_name=""):
     attempts = [
         {"dpi": 260, "psm": 6},
         {"dpi": 300, "psm": 6},
@@ -117,17 +117,17 @@ def redetect_page(page):
             psm=attempt["psm"]
         )
 
-        row = extract_data(text)
+        row = extract_data(text, file_name)
 
         score = 0
 
         if row["Nom sondage"]:
             score += 1
 
-        if row["X"] and 200000 <= row["X"] <= 400000:
+        if row["X"]:
             score += 1
 
-        if row["Y"] and 100000 <= row["Y"] <= 200000:
+        if row["Y"]:
             score += 1
 
         if score > best_score:
@@ -144,7 +144,7 @@ def is_6_digits(value):
     try:
         value = int(float(value))
         return 100000 <= value <= 999999
-    except:
+    except Exception:
         return False
 
 
@@ -188,6 +188,7 @@ uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 if uploaded_pdf:
 
     pdf_bytes = uploaded_pdf.getvalue()
+    file_name = uploaded_pdf.name
 
     if "df_result" not in st.session_state:
         st.session_state.df_result = None
@@ -204,11 +205,8 @@ if uploaded_pdf:
                 page_number = i + 1
 
                 text = ocr_page(page)
-                row = extract_data(text)
+                row = extract_data(text, file_name)
                 row["Page"] = page_number
-
-                if not row["Nom sondage"]:
-                    row["Nom sondage"] = fix_missing_name(results)
 
                 if row["Nom sondage"] or row["X"] or row["Y"]:
                     results.append(row)
@@ -235,13 +233,11 @@ if uploaded_pdf:
 
         if len(error_rows) > 0:
             st.warning(f"{len(error_rows)} ligne(s) problématique(s) détectée(s).")
-
             st.dataframe(error_rows, width="stretch")
 
             if st.button("Corriger / redétecter seulement les lignes problématiques"):
                 try:
                     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
                     progress_fix = st.progress(0)
 
                     error_indexes = list(error_rows.index)
@@ -250,15 +246,15 @@ if uploaded_pdf:
                         page_number = int(df.at[idx, "Page"])
                         page = doc[page_number - 1]
 
-                        new_row = redetect_page(page)
+                        new_row = redetect_page(page, file_name)
 
-                        if new_row["Nom sondage"]:
+                        if new_row and new_row["Nom sondage"]:
                             df.at[idx, "Nom sondage"] = new_row["Nom sondage"]
 
-                        if new_row["X"]:
+                        if new_row and new_row["X"]:
                             df.at[idx, "X"] = new_row["X"]
 
-                        if new_row["Y"]:
+                        if new_row and new_row["Y"]:
                             df.at[idx, "Y"] = new_row["Y"]
 
                         progress_fix.progress(count / len(error_indexes))
