@@ -16,7 +16,7 @@ def clean_number(value):
     if not value:
         return None
 
-    value = value.replace(" ", "").replace(",", ".")
+    value = str(value).replace(" ", "").replace(",", ".")
 
     try:
         return float(value)
@@ -70,17 +70,55 @@ def fix_missing_name(results):
     return f"{prefix}{number:03d}"
 
 
-def ocr_page(page):
-    pix = page.get_pixmap(dpi=220)
+def ocr_page(page, dpi=220, psm=6):
+    pix = page.get_pixmap(dpi=dpi)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     text = pytesseract.image_to_string(
         img,
         lang="eng",
-        config="--psm 6"
+        config=f"--psm {psm}"
     )
 
     return text
+
+
+def redetect_page(page):
+    attempts = [
+        {"dpi": 260, "psm": 6},
+        {"dpi": 300, "psm": 6},
+        {"dpi": 300, "psm": 4},
+        {"dpi": 350, "psm": 6},
+    ]
+
+    best_row = None
+    best_score = -1
+
+    for attempt in attempts:
+        text = ocr_page(
+            page,
+            dpi=attempt["dpi"],
+            psm=attempt["psm"]
+        )
+
+        row = extract_data(text)
+
+        score = 0
+
+        if row["Nom sondage"]:
+            score += 1
+
+        if row["X"] and 200000 <= row["X"] <= 400000:
+            score += 1
+
+        if row["Y"] and 100000 <= row["Y"] <= 200000:
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    return best_row
 
 
 def detect_errors(df):
@@ -104,19 +142,8 @@ def detect_errors(df):
     return df
 
 
-def has_errors(df):
-    errors = df[
-        (df["Nom sondage"].isna()) |
-        (df["Nom sondage"] == "") |
-        (df["X"].isna()) |
-        (df["Y"].isna()) |
-        (df["X"] < 200000) |
-        (df["X"] > 400000) |
-        (df["Y"] < 100000) |
-        (df["Y"] > 200000)
-    ]
-
-    return errors
+def get_error_rows(df):
+    return df[df["Erreur"] != ""]
 
 
 def create_excel(df):
@@ -133,63 +160,110 @@ uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
 if uploaded_pdf:
 
-    try:
-        doc = fitz.open(stream=uploaded_pdf.getvalue(), filetype="pdf")
-        results = []
+    pdf_bytes = uploaded_pdf.getvalue()
 
-        st.info(f"PDF chargé : {len(doc)} pages")
+    if "df_result" not in st.session_state:
+        st.session_state.df_result = None
 
-        progress = st.progress(0)
+    if st.button("Extraire le PDF"):
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            results = []
 
-        for i, page in enumerate(doc):
-            page_number = i + 1
+            st.info(f"PDF chargé : {len(doc)} pages")
+            progress = st.progress(0)
 
-            text = ocr_page(page)
+            for i, page in enumerate(doc):
+                page_number = i + 1
 
-            row = extract_data(text)
-            row["Page"] = page_number
+                text = ocr_page(page)
+                row = extract_data(text)
+                row["Page"] = page_number
 
-            if not row["Nom sondage"]:
-                row["Nom sondage"] = fix_missing_name(results)
+                if not row["Nom sondage"]:
+                    row["Nom sondage"] = fix_missing_name(results)
 
-            if row["Nom sondage"] or row["X"] or row["Y"]:
-                results.append(row)
+                if row["Nom sondage"] or row["X"] or row["Y"]:
+                    results.append(row)
 
-            progress.progress(page_number / len(doc))
+                progress.progress(page_number / len(doc))
 
-        if results:
-            df = pd.DataFrame(results)
-            df = detect_errors(df)
-
-            st.success(f"{len(df)} lignes trouvées")
-
-            st.warning("Corrige les lignes avec erreur avant de télécharger Excel.")
-
-            edited_df = st.data_editor(
-                df,
-                width="stretch",
-                num_rows="dynamic"
-            )
-
-            errors_remaining = has_errors(edited_df)
-
-            if len(errors_remaining) == 0:
-                final_df = edited_df.drop(columns=["Erreur"], errors="ignore")
-
-                excel_file = create_excel(final_df)
-
-                st.download_button(
-                    label="Télécharger Excel validé",
-                    data=excel_file,
-                    file_name="sondages_valides.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            if results:
+                df = pd.DataFrame(results)
+                df = detect_errors(df)
+                st.session_state.df_result = df
             else:
-                st.error(f"{len(errors_remaining)} ligne(s) à corriger avant téléchargement.")
+                st.warning("Aucune donnée trouvée.")
 
+        except Exception as e:
+            st.error("Erreur pendant le traitement")
+            st.code(str(e))
+
+    if st.session_state.df_result is not None:
+
+        df = st.session_state.df_result.copy()
+        error_rows = get_error_rows(df)
+
+        st.success(f"{len(df)} lignes trouvées")
+
+        if len(error_rows) > 0:
+            st.warning(f"{len(error_rows)} ligne(s) problématique(s) détectée(s).")
+
+            st.dataframe(error_rows, width="stretch")
+
+            if st.button("Corriger / redétecter seulement les lignes problématiques"):
+                try:
+                    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+                    progress_fix = st.progress(0)
+
+                    error_indexes = list(error_rows.index)
+
+                    for count, idx in enumerate(error_indexes, start=1):
+                        page_number = int(df.at[idx, "Page"])
+                        page = doc[page_number - 1]
+
+                        new_row = redetect_page(page)
+
+                        if new_row["Nom sondage"]:
+                            df.at[idx, "Nom sondage"] = new_row["Nom sondage"]
+
+                        if new_row["X"]:
+                            df.at[idx, "X"] = new_row["X"]
+
+                        if new_row["Y"]:
+                            df.at[idx, "Y"] = new_row["Y"]
+
+                        progress_fix.progress(count / len(error_indexes))
+
+                    df = detect_errors(df)
+                    st.session_state.df_result = df
+
+                    st.success("Redétection terminée.")
+
+                except Exception as e:
+                    st.error("Erreur pendant la redétection")
+                    st.code(str(e))
+
+        edited_df = st.data_editor(
+            st.session_state.df_result,
+            width="stretch",
+            num_rows="dynamic"
+        )
+
+        edited_df = detect_errors(edited_df)
+        errors_remaining = get_error_rows(edited_df)
+
+        if len(errors_remaining) == 0:
+            final_df = edited_df.drop(columns=["Erreur"], errors="ignore")
+
+            excel_file = create_excel(final_df)
+
+            st.download_button(
+                label="Télécharger Excel validé",
+                data=excel_file,
+                file_name="sondages_valides.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            st.warning("Aucune donnée trouvée.")
-
-    except Exception as e:
-        st.error("Erreur pendant le traitement")
-        st.code(str(e))
+            st.error(f"{len(errors_remaining)} ligne(s) à corriger avant téléchargement.")
