@@ -9,14 +9,16 @@ from PIL import Image
 
 
 st.set_page_config(page_title="PDF OCR vers Excel", layout="wide")
-st.title("Extraction OCR PDF vers Excel")
+st.title("Extraction corrigée PDF OCR vers Excel")
 
 
 def clean_number(value):
     if not value:
         return None
 
-    value = value.replace(" ", "").replace(",", ".")
+    value = str(value)
+    value = value.replace(" ", "")
+    value = value.replace(",", ".")
 
     try:
         return float(value)
@@ -32,13 +34,13 @@ def extract_data(text):
     )
 
     x_match = re.search(
-        r"X\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
+        r"X\s*[:\-]?\s*([\d\s.,]+)",
         text,
         re.I
     )
 
     y_match = re.search(
-        r"Y\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
+        r"Y\s*[:\-]?\s*([\d\s.,]+)",
         text,
         re.I
     )
@@ -47,31 +49,25 @@ def extract_data(text):
         "Nom sondage": sondage_match.group(1) if sondage_match else None,
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
+        "Texte OCR": text
     }
 
 
-def fix_missing_name(results):
-    if not results:
-        return None
+def ocr_header(page):
+    rect = page.rect
 
-    last_name = results[-1].get("Nom sondage")
+    crop = fitz.Rect(
+        rect.width * 0.25,
+        rect.height * 0.08,
+        rect.width * 0.98,
+        rect.height * 0.24
+    )
 
-    if not last_name:
-        return None
+    pix = page.get_pixmap(
+        matrix=fitz.Matrix(3, 3),
+        clip=crop
+    )
 
-    match = re.search(r"(.+_)(\d+)$", last_name)
-
-    if not match:
-        return None
-
-    prefix = match.group(1)
-    number = int(match.group(2)) + 1
-
-    return f"{prefix}{number:03d}"
-
-
-def ocr_page(page):
-    pix = page.get_pixmap(dpi=220)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     text = pytesseract.image_to_string(
@@ -83,40 +79,108 @@ def ocr_page(page):
     return text
 
 
-def detect_errors(df):
-    df["Erreur"] = ""
+def fix_name(name, previous_name):
+    if name and re.search(r"_\d+$", name):
+        return name
 
-    for idx, row in df.iterrows():
+    if previous_name:
+        match = re.search(r"(.+_)(\d+)$", previous_name)
+        if match:
+            prefix = match.group(1)
+            number = int(match.group(2)) + 1
+            return f"{prefix}{number:03d}"
+
+    return name
+
+
+def generate_candidates(value):
+    if value is None:
+        return []
+
+    candidates = [value]
+
+    if value < 1000:
+        candidates.append(value * 1000)
+
+    if value > 1000000:
+        txt = str(value).replace(".", "")
+        if len(txt) >= 7:
+            try:
+                candidates.append(float(txt[1:-2] + "." + txt[-2:]))
+            except ValueError:
+                pass
+
+        candidates.append(value / 10)
+
+    if 200000 <= value <= 210000:
+        candidates.append(value + 90000)
+
+    return candidates
+
+
+def fix_by_neighbors(values, min_value, max_value):
+    fixed = values.copy()
+
+    for i, value in enumerate(values):
+        candidates = generate_candidates(value)
+
+        valid_candidates = [
+            c for c in candidates
+            if c is not None and min_value <= c <= max_value
+        ]
+
+        if not valid_candidates:
+            fixed[i] = value
+            continue
+
+        prev_val = None
+        next_val = None
+
+        for j in range(i - 1, -1, -1):
+            if fixed[j] is not None and min_value <= fixed[j] <= max_value:
+                prev_val = fixed[j]
+                break
+
+        for j in range(i + 1, len(values)):
+            if values[j] is not None and min_value <= values[j] <= max_value:
+                next_val = values[j]
+                break
+
+        if prev_val is not None and next_val is not None:
+            target = (prev_val + next_val) / 2
+            fixed[i] = min(valid_candidates, key=lambda x: abs(x - target))
+
+        elif prev_val is not None:
+            fixed[i] = min(valid_candidates, key=lambda x: abs(x - prev_val))
+
+        elif next_val is not None:
+            fixed[i] = min(valid_candidates, key=lambda x: abs(x - next_val))
+
+        else:
+            fixed[i] = valid_candidates[0]
+
+    return fixed
+
+
+def detect_errors(df):
+    errors = []
+
+    for _, row in df.iterrows():
+        err = ""
 
         if pd.isna(row["Nom sondage"]) or row["Nom sondage"] == "":
-            df.at[idx, "Erreur"] += "Nom manquant; "
+            err += "Nom manquant; "
 
-        if pd.isna(row["X"]):
-            df.at[idx, "Erreur"] += "X manquant; "
-        elif row["X"] < 200000 or row["X"] > 400000:
-            df.at[idx, "Erreur"] += "X suspect; "
+        if pd.isna(row["X"]) or row["X"] < 200000 or row["X"] > 400000:
+            err += "X suspect; "
 
-        if pd.isna(row["Y"]):
-            df.at[idx, "Erreur"] += "Y manquant; "
-        elif row["Y"] < 100000 or row["Y"] > 200000:
-            df.at[idx, "Erreur"] += "Y suspect; "
+        if pd.isna(row["Y"]) or row["Y"] < 100000 or row["Y"] > 200000:
+            err += "Y suspect; "
 
+        errors.append(err)
+
+    df["Erreur"] = errors
     return df
-
-
-def has_errors(df):
-    errors = df[
-        (df["Nom sondage"].isna()) |
-        (df["Nom sondage"] == "") |
-        (df["X"].isna()) |
-        (df["Y"].isna()) |
-        (df["X"] < 200000) |
-        (df["X"] > 400000) |
-        (df["Y"] < 100000) |
-        (df["Y"] > 200000)
-    ]
-
-    return errors
 
 
 def create_excel(df):
@@ -132,63 +196,55 @@ def create_excel(df):
 uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
 if uploaded_pdf:
-
     try:
         doc = fitz.open(stream=uploaded_pdf.getvalue(), filetype="pdf")
         results = []
 
+        progress = st.progress(0)
         st.info(f"PDF chargé : {len(doc)} pages")
 
-        progress = st.progress(0)
+        previous_name = None
 
         for i, page in enumerate(doc):
-            page_number = i + 1
-
-            text = ocr_page(page)
-
+            text = ocr_header(page)
             row = extract_data(text)
-            row["Page"] = page_number
 
-            if not row["Nom sondage"]:
-                row["Nom sondage"] = fix_missing_name(results)
+            row["Page"] = i + 1
+            row["Nom sondage"] = fix_name(row["Nom sondage"], previous_name)
 
-            if row["Nom sondage"] or row["X"] or row["Y"]:
-                results.append(row)
+            if row["Nom sondage"]:
+                previous_name = row["Nom sondage"]
 
-            progress.progress(page_number / len(doc))
+            results.append(row)
 
-        if results:
-            df = pd.DataFrame(results)
-            df = detect_errors(df)
+            progress.progress((i + 1) / len(doc))
 
-            st.success(f"{len(df)} lignes trouvées")
+        df = pd.DataFrame(results)
 
-            st.warning("Corrige les lignes avec erreur avant de télécharger Excel.")
+        df["X"] = fix_by_neighbors(df["X"].tolist(), 200000, 400000)
+        df["Y"] = fix_by_neighbors(df["Y"].tolist(), 100000, 200000)
 
-            edited_df = st.data_editor(
-                df,
-                width="stretch",
-                num_rows="dynamic"
+        df = detect_errors(df)
+
+        display_df = df.drop(columns=["Texte OCR"], errors="ignore")
+
+        st.success("Extraction terminée")
+        edited_df = st.data_editor(display_df, width="stretch", num_rows="dynamic")
+
+        errors_left = edited_df[edited_df["Erreur"] != ""]
+
+        if len(errors_left) == 0:
+            final_df = edited_df.drop(columns=["Erreur"], errors="ignore")
+            excel_file = create_excel(final_df)
+
+            st.download_button(
+                "Télécharger Excel corrigé",
+                excel_file,
+                file_name="sondages_corriges.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-            errors_remaining = has_errors(edited_df)
-
-            if len(errors_remaining) == 0:
-                final_df = edited_df.drop(columns=["Erreur"], errors="ignore")
-
-                excel_file = create_excel(final_df)
-
-                st.download_button(
-                    label="Télécharger Excel validé",
-                    data=excel_file,
-                    file_name="sondages_valides.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.error(f"{len(errors_remaining)} ligne(s) à corriger avant téléchargement.")
-
         else:
-            st.warning("Aucune donnée trouvée.")
+            st.warning(f"{len(errors_left)} ligne(s) encore suspecte(s). Corrige-les dans le tableau.")
 
     except Exception as e:
         st.error("Erreur pendant le traitement")
