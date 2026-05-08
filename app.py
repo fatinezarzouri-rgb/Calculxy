@@ -24,54 +24,82 @@ def clean_number(value):
         return None
 
 
+def normalize_sondage_name(value):
+    if not value:
+        return None
+
+    value = value.strip()
+    value = value.replace(" ", "")
+    value = value.replace("-", "_")
+    value = value.replace("__", "_")
+
+    value = value.replace("5P", "SP")
+    value = value.replace("S0", "SP")
+    value = value.replace("§P", "SP")
+
+    match = re.search(r"(SP_[A-Za-z0-9]+_\d{1,4})", value, re.I)
+
+    if not match:
+        return None
+
+    name = match.group(1)
+    parts = name.split("_")
+
+    if len(parts) == 3:
+        return f"{parts[0].upper()}_{parts[1]}_{parts[2].zfill(3)}"
+
+    return name
+
+
 def extract_data(text):
-    sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-]+)",
-        text,
-        re.I
-    )
+    text_clean = text.replace("\n", " ")
+    text_clean = re.sub(r"\s+", " ", text_clean)
+
+    sondage = None
+
+    patterns = [
+        r"Sondage\s*[:\-]?\s*([A-Za-z0-9_\-\s]{5,50})",
+        r"(SP\s*[_\- ]\s*[A-Za-z0-9]+\s*[_\- ]\s*\d{1,4})",
+        r"(S\s*P\s*[_\- ]\s*[A-Za-z0-9]+\s*[_\- ]\s*\d{1,4})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text_clean, re.I)
+        if match:
+            sondage = normalize_sondage_name(match.group(1))
+            if sondage:
+                break
 
     x_match = re.search(
-        r"X\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
-        text,
+        r"\bX\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
+        text_clean,
         re.I
     )
 
     y_match = re.search(
-        r"Y\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
-        text,
+        r"\bY\s*[:\-]?\s*([\d\s]+[,\.]\d+|\d+)",
+        text_clean,
         re.I
     )
 
     return {
-        "Nom sondage": sondage_match.group(1) if sondage_match else None,
+        "Nom sondage": sondage,
         "X": clean_number(x_match.group(1)) if x_match else None,
         "Y": clean_number(y_match.group(1)) if y_match else None,
     }
 
 
-def fix_missing_name(results):
-    if not results:
-        return None
+def ocr_header(page, dpi=400, psm=6):
+    rect = page.rect
 
-    last_name = results[-1].get("Nom sondage")
+    zone_haut = fitz.Rect(
+        rect.width * 0.18,
+        rect.height * 0.06,
+        rect.width * 0.98,
+        rect.height * 0.26
+    )
 
-    if not last_name:
-        return None
-
-    match = re.search(r"(.+_)(\d+)$", last_name)
-
-    if not match:
-        return None
-
-    prefix = match.group(1)
-    number = int(match.group(2)) + 1
-
-    return f"{prefix}{number:03d}"
-
-
-def ocr_page(page, dpi=220, psm=6):
-    pix = page.get_pixmap(dpi=dpi)
+    pix = page.get_pixmap(dpi=dpi, clip=zone_haut)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     text = pytesseract.image_to_string(
@@ -84,29 +112,27 @@ def ocr_page(page, dpi=220, psm=6):
 
 
 def redetect_page(page):
-    attempts = [
-        {"dpi": 260, "psm": 6},
-        {"dpi": 300, "psm": 6},
-        {"dpi": 300, "psm": 4},
-        {"dpi": 350, "psm": 6},
-    ]
-
     best_row = None
     best_score = -1
 
-    for attempt in attempts:
-        text = ocr_page(
-            page,
-            dpi=attempt["dpi"],
-            psm=attempt["psm"]
-        )
+    attempts = [
+        (300, 6),
+        (400, 6),
+        (450, 6),
+        (500, 6),
+        (600, 6),
+        (400, 4),
+        (500, 4),
+    ]
 
+    for dpi, psm in attempts:
+        text = ocr_header(page, dpi=dpi, psm=psm)
         row = extract_data(text)
 
         score = 0
 
         if row["Nom sondage"]:
-            score += 1
+            score += 2
 
         if row["X"] and 200000 <= row["X"] <= 400000:
             score += 1
@@ -118,10 +144,14 @@ def redetect_page(page):
             best_score = score
             best_row = row
 
+        if score == 4:
+            return row
+
     return best_row
 
 
 def detect_errors(df):
+    df = df.copy()
     df["Erreur"] = ""
 
     for idx, row in df.iterrows():
@@ -142,12 +172,10 @@ def detect_errors(df):
     return df
 
 
-def get_error_rows(df):
-    return df[df["Erreur"] != ""]
-
-
 def create_excel(df):
     output = BytesIO()
+
+    df = df.drop(columns=["Erreur"], errors="ignore")
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Sondages")
@@ -159,7 +187,6 @@ def create_excel(df):
 uploaded_pdf = st.file_uploader("Importer le PDF", type=["pdf"])
 
 if uploaded_pdf:
-
     pdf_bytes = uploaded_pdf.getvalue()
 
     if "df_result" not in st.session_state:
@@ -176,12 +203,9 @@ if uploaded_pdf:
             for i, page in enumerate(doc):
                 page_number = i + 1
 
-                text = ocr_page(page)
+                text = ocr_header(page, dpi=400, psm=6)
                 row = extract_data(text)
                 row["Page"] = page_number
-
-                if not row["Nom sondage"]:
-                    row["Nom sondage"] = fix_missing_name(results)
 
                 if row["Nom sondage"] or row["X"] or row["Y"]:
                     results.append(row)
@@ -192,6 +216,7 @@ if uploaded_pdf:
                 df = pd.DataFrame(results)
                 df = detect_errors(df)
                 st.session_state.df_result = df
+                st.rerun()
             else:
                 st.warning("Aucune donnée trouvée.")
 
@@ -200,21 +225,19 @@ if uploaded_pdf:
             st.code(str(e))
 
     if st.session_state.df_result is not None:
-
         df = st.session_state.df_result.copy()
-        error_rows = get_error_rows(df)
+        error_rows = df[df["Erreur"] != ""]
 
         st.success(f"{len(df)} lignes trouvées")
 
         if len(error_rows) > 0:
-            st.warning(f"{len(error_rows)} ligne(s) problématique(s) détectée(s).")
+            st.warning(f"{len(error_rows)} ligne(s) problématique(s).")
 
             st.dataframe(error_rows, width="stretch")
 
-            if st.button("Corriger / redétecter seulement les lignes problématiques"):
+            if st.button("Corriger / redétecter les lignes problématiques"):
                 try:
                     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
                     progress_fix = st.progress(0)
 
                     error_indexes = list(error_rows.index)
@@ -225,24 +248,19 @@ if uploaded_pdf:
 
                         new_row = redetect_page(page)
 
-                        if new_row["Nom sondage"]:
+                        if new_row:
                             df.at[idx, "Nom sondage"] = new_row["Nom sondage"]
-
-                        if new_row["X"]:
                             df.at[idx, "X"] = new_row["X"]
-
-                        if new_row["Y"]:
                             df.at[idx, "Y"] = new_row["Y"]
 
                         progress_fix.progress(count / len(error_indexes))
 
                     df = detect_errors(df)
                     st.session_state.df_result = df
-
-                    st.success("Redétection terminée.")
+                    st.rerun()
 
                 except Exception as e:
-                    st.error("Erreur pendant la redétection")
+                    st.error("Erreur pendant la correction")
                     st.code(str(e))
 
         edited_df = st.data_editor(
@@ -252,12 +270,12 @@ if uploaded_pdf:
         )
 
         edited_df = detect_errors(edited_df)
-        errors_remaining = get_error_rows(edited_df)
+        st.session_state.df_result = edited_df
+
+        errors_remaining = edited_df[edited_df["Erreur"] != ""]
 
         if len(errors_remaining) == 0:
-            final_df = edited_df.drop(columns=["Erreur"], errors="ignore")
-
-            excel_file = create_excel(final_df)
+            excel_file = create_excel(edited_df)
 
             st.download_button(
                 label="Télécharger Excel validé",
@@ -266,4 +284,4 @@ if uploaded_pdf:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error(f"{len(errors_remaining)} ligne(s) à corriger avant téléchargement.")
+            st.error(f"{len(errors_remaining)} ligne(s) restent à corriger.")
