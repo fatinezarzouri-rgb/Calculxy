@@ -29,10 +29,10 @@ def extract_data(text):
 
     # NOM SONDAGE
     sondage_match = re.search(
-        r"Sondage\s*[:\-]?\s*([^\s]+)",
-        text,
-        re.I
-    )
+    r"Sondage\s*[:\-]?\s*([^\s]+)",
+    text,
+    re.I
+)
 
     # X avec exactement 2 chiffres après virgule/point
     x_match = re.search(
