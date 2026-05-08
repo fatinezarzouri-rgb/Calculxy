@@ -171,15 +171,17 @@ def extract_data_optimized(text, page_num, last_valid_name=None):
 
 
 def ocr_page_optimized(page, dpi=300, psm=6):
-    """OCR optimisée avec prétraitement"""
+    """OCR optimisée avec prétraitement - Version corrigée"""
+    # Récupération de l'image en niveaux de gris
     pix = page.get_pixmap(dpi=dpi, colorspace="gray")
     img = Image.frombytes("L", [pix.width, pix.height], pix.samples)
     
     # Prétraitement
     img = preprocess_image(img)
     
-    # Configuration OCR optimisée
-    custom_config = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_:,. -"
+    # Configuration OCR simplifiée et CORRECTE
+    # Le problème était le tiret dans whitelist
+    custom_config = f"--psm {psm} --oem 3"
     
     text = pytesseract.image_to_string(
         img,
@@ -214,8 +216,6 @@ def extract_all_pages_optimized(doc):
     progress = st.progress(0)
     status_text = st.empty()
     
-    sondage_map = {}  # Pour suivre les sondages par page
-    
     for i, page in enumerate(doc):
         page_num = i + 1
         status_text.text(f"Traitement page {page_num}/{total_pages}...")
@@ -231,25 +231,29 @@ def extract_all_pages_optimized(doc):
             attempts = [{"dpi": 300, "psm": 6}, {"dpi": 350, "psm": 6}]
         
         for attempt in attempts:
-            text = ocr_page_optimized(page, dpi=attempt["dpi"], psm=attempt["psm"])
-            result = extract_data_optimized(text, page_num)
-            
-            # Score amélioré
-            score = 0
-            if result["Nom sondage"] and len(result["Nom sondage"]) >= 5:
-                score += 3
-            if result["X"] and 200000 <= result["X"] <= 400000:
-                score += 3
-            if result["Y"] and 100000 <= result["Y"] <= 200000:
-                score += 3
-            
-            # Bonus si le nom correspond aux patterns attendus
-            if result["Nom sondage"] and re.match(r"SP_(?:Rem|Reta)_\d{3}", result["Nom sondage"]):
-                score += 2
-            
-            if score > best_score:
-                best_score = score
-                best_result = result
+            try:
+                text = ocr_page_optimized(page, dpi=attempt["dpi"], psm=attempt["psm"])
+                result = extract_data_optimized(text, page_num)
+                
+                # Score amélioré
+                score = 0
+                if result["Nom sondage"] and len(result["Nom sondage"]) >= 5:
+                    score += 3
+                if result["X"] and 200000 <= result["X"] <= 400000:
+                    score += 3
+                if result["Y"] and 100000 <= result["Y"] <= 200000:
+                    score += 3
+                
+                # Bonus si le nom correspond aux patterns attendus
+                if result["Nom sondage"] and re.match(r"SP_(?:Rem|Reta)_\d{3}", result["Nom sondage"]):
+                    score += 2
+                
+                if score > best_score:
+                    best_score = score
+                    best_result = result
+            except Exception as e:
+                st.warning(f"Erreur sur page {page_num}: {str(e)}")
+                continue
         
         # Post-traitement
         if best_result:
@@ -395,16 +399,16 @@ if uploaded_pdf:
             final_df.to_excel(writer, index=False, sheet_name="Sondages")
             
             # Synthèse
-            summary = pd.DataFrame({
-                "Statistique": ["Total sondages", "Pages traitées", "Date extraction", "Taux de succès"],
-                "Valeur": [
-                    len(final_df),
-                    final_df["Page"].max() if not final_df.empty else 0,
-                    pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    f"{(len(final_df) - len(errors_remaining)) / len(final_df) * 100:.1f}%" if len(final_df) > 0 else "0%"
-                ]
-            })
-            summary.to_excel(writer, index=False, sheet_name="Synthèse")
+            if not final_df.empty:
+                summary = pd.DataFrame({
+                    "Statistique": ["Total sondages", "Pages traitées", "Date extraction"],
+                    "Valeur": [
+                        len(final_df),
+                        final_df["Page"].max(),
+                        pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ]
+                })
+                summary.to_excel(writer, index=False, sheet_name="Synthèse")
         
         output.seek(0)
         
