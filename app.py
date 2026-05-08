@@ -27,11 +27,27 @@ def extract_data(text):
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
 
-    sondage_match = re.search(
-        r"Sondage(?:\s+pressiométrique\s+Ménard)?\s*[:\-]?\s*(.+?)(?=\s+Type|\s+Machine|\s+X\s*[:\-]|\s+Y\s*[:\-]|$)",
+    nom = None
+
+    # ===== FORMAT LPEE =====
+    match_lpee = re.search(
+        r"Sondage\s*[:\-]\s*([A-Za-z0-9_\-]+)",
         text,
         re.I
     )
+
+    # ===== FORMAT LABO / TEST =====
+    match_labo = re.search(
+        r"Sondage\s+pressiométrique\s+Ménard\s*[:\-]\s*([A-Za-z0-9_\-]+)",
+        text,
+        re.I
+    )
+
+    if match_labo:
+        nom = match_labo.group(1).strip()
+
+    elif match_lpee:
+        nom = match_lpee.group(1).strip()
 
     x_match = re.search(
         r"\bX\s*[:\-]?\s*([0-9\s]+(?:[,.]\d{1,2})?)",
@@ -44,14 +60,6 @@ def extract_data(text):
         text,
         re.I
     )
-
-    nom = None
-
-    if sondage_match:
-        nom = sondage_match.group(1).strip()
-        nom = nom.replace(" ", "")
-        nom = nom.replace(":", "")
-        nom = nom.replace(";", "")
 
     return {
         "Nom sondage": nom,
@@ -129,6 +137,17 @@ def redetect_page(page):
     return best_row
 
 
+def is_6_digits(value):
+    if pd.isna(value):
+        return False
+
+    try:
+        value = int(float(value))
+        return 100000 <= value <= 999999
+    except:
+        return False
+
+
 def detect_errors(df):
     df["Erreur"] = ""
 
@@ -139,13 +158,13 @@ def detect_errors(df):
 
         if pd.isna(row["X"]):
             df.at[idx, "Erreur"] += "X manquant; "
-        elif row["X"] < 200000 or row["X"] > 400000:
-            df.at[idx, "Erreur"] += "X suspect; "
+        elif not is_6_digits(row["X"]):
+            df.at[idx, "Erreur"] += "X doit avoir 6 chiffres; "
 
         if pd.isna(row["Y"]):
             df.at[idx, "Erreur"] += "Y manquant; "
-        elif row["Y"] < 100000 or row["Y"] > 200000:
-            df.at[idx, "Erreur"] += "Y suspect; "
+        elif not is_6_digits(row["Y"]):
+            df.at[idx, "Erreur"] += "Y doit avoir 6 chiffres; "
 
     return df
 
